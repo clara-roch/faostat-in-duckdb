@@ -1,0 +1,18 @@
+# R files
+.Rhistory
+.RData
+.Ruser
+.DS_Store
+*.Rproj.user/
+renv/
+!renv/activate.R
+!renv/settings.dcf
+
+# Quarto files
+*.html
+*_files/
+
+# User files
+.envrc
+/.DS_Store
+/.agent-shell/
