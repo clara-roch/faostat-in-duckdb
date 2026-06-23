@@ -16,3 +16,6 @@ renv/
 .envrc
 /.DS_Store
 /.agent-shell/
+
+# Data
+*.zip
