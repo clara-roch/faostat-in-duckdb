@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "faostatdb"
+version = "0.1.0"
+description = "Build a local, source-preserving DuckDB mirror of FAOSTAT bulk data."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Clara ROCH", email = "clara.roch.c@gmail.com" }]
+keywords = ["faostat", "duckdb", "food", "agriculture", "data"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = ["duckdb>=0.10"]
+
+[project.optional-dependencies]
+ui = ["rich>=13.0", "platformdirs>=4.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+faostatdb = "faostatdb.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/clara-roch/faostatdb"
+
+[tool.hatch.build.targets.wheel]
+packages = ["faostatdb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,11 @@
+[build]
+database = "faostat.duckdb"
+download_dir = "${FAOSTATDB_DOWNLOAD_DIR}" # where ZIP archives are cached
+keep_archives = false
+jobs = 6
+overwrite = false
+
+[datasets]
+mode = "all"            # all | include | exclude
+include = []
+exclude = ["FA", "CBH"]

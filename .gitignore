@@ -1,21 +1,49 @@
-# R files
-.Rhistory
-.RData
-.Ruser
-.DS_Store
-*.Rproj.user/
-renv/
-!renv/activate.R
-!renv/settings.dcf
+# Byte-compiled / optimized / cache
+__pycache__/
+*.py[cod]
+*$py.class
 
-# Quarto files
-*.html
-*_files/
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
 
-# User files
+# Virtual environments
+.venv/
+venv/
+env/
 .envrc
-/.DS_Store
-/.agent-shell/
 
-# Data
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# DuckDB databases
+*.duckdb
+*.duckdb.wal
+
+# FAOSTAT download cache & archives
+.faostatdb-downloads/
 *.zip
+
+# OS files
+.DS_Store
+
+# IDE / agent
+/.agent-shell/
+.idea/
+.vscode/
+.github/
+.claude/
+
+FAOSTATdb_files/
+README_files/
+
+FAOSTATdb.html
