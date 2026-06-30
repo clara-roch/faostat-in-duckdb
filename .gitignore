@@ -15,6 +15,7 @@ dist/
 venv/
 env/
 .envrc
+*.env
 
 # Testing / coverage
 .pytest_cache/
@@ -29,8 +30,9 @@ htmlcov/
 *.duckdb
 *.duckdb.wal
 
-# FAOSTAT download cache & archives
+# FAOSTAT download cache & archives (temporary, project-local)
 .faostatdb-downloads/
+faostat_temp_download/
 *.zip
 
 # OS files
@@ -43,7 +45,11 @@ htmlcov/
 .github/
 .claude/
 
+# Md-compilation files
 FAOSTATdb_files/
 README_files/
+*.html
 
-FAOSTATdb.html
+# Local secrets / machine-specific paths
+secrets.env
+*.env

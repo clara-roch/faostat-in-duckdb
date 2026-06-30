@@ -49,7 +49,7 @@ def extract_main_csv(archive: Path, dest_dir: Path) -> Path:
 def read_csv_header(con, csv_path: Path) -> list[str]:
     """Return the raw column names of ``csv_path`` as DuckDB sees them."""
     rel = con.execute(
-        "SELECT * FROM read_csv(?, header=true, sample_size=1) LIMIT 0",
+        "SELECT * FROM read_csv(?, header=true, sample_size=1, encoding='latin-1') LIMIT 0",
         [str(csv_path)],
     )
     return [d[0] for d in rel.description]
@@ -71,7 +71,7 @@ def import_csv(con, csv_path: Path, dataset_code: str) -> ImportResult:
     con.execute(f'DROP TABLE IF EXISTS "{table}"')
     con.execute(
         f'CREATE TABLE "{table}" AS '
-        f"SELECT {projection} FROM read_csv(?, header=true)",
+        f"SELECT {projection} FROM read_csv(?, header=true, encoding='latin-1')",
         [str(csv_path)],
     )
     (count,) = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()

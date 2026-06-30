@@ -23,7 +23,6 @@ Required dependency: `duckdb`. Optional: `rich`, `platformdirs`.
 
 ```bash
 faostatdb list [--remote]                 # list available datasets
-faostatdb config init                     # write a default faostatdb.toml
 faostatdb config show                     # print the effective configuration
 faostatdb build [--database faostat.duckdb] [--include QCL,FBS] [--exclude FA,CBH] \
                 [--jobs N] [--keep-archives] [--download-dir DIR] [--yes] [--strict]
@@ -54,7 +53,7 @@ installed `faostatdb` command or `python -m faostatdb` (via
 | --- | --- |
 | [`cli.py`](faostatdb/cli.py) | Parses arguments, dispatches to `list` / `config` / `build`, and orchestrates the build (selection → confirm → download → validate → import → metadata). |
 | [`__main__.py`](faostatdb/__main__.py) | Lets you run the tool with `python -m faostatdb`. |
-| [`config.py`](faostatdb/config.py) | Loads `faostatdb.toml` (stdlib `tomllib`), merges it over built-in defaults, and powers `config init` / `config show`. Defaults < TOML < CLI flags. |
+| [`config.py`](faostatdb/config.py) | Loads the committed `faostatdb.toml` (stdlib `tomllib`), applies overrides from `secrets.env` env vars, and powers `config show`. TOML < `secrets.env` < CLI flags. |
 | [`metadata.py`](faostatdb/metadata.py) | Fetches and parses the bulk inventory `datasets_E.json`, hashes it for reproducibility, and applies `all` / `include` / `exclude` selection. |
 | [`paths.py`](faostatdb/paths.py) | Resolves **where archives are cached** and where the download manifest lives. |
 | [`download.py`](faostatdb/download.py) | Downloads archives with retry/backoff, tracks every dataset in a hot-restart **manifest** state machine, and writes via `*.part` → atomic rename. |
@@ -65,9 +64,9 @@ installed `faostatdb` command or `python -m faostatdb` (via
 
 ### Order of calls during `faostatdb build`
 
-1. **Configure** — `cli.main` calls `config.load_config()`: built-in defaults are
-   overridden by `faostatdb.toml` (if present in the cwd), then by CLI flags
-   (`_apply_build_overrides`).
+1. **Configure** — `cli.main` calls `config.load_config()`: the committed
+   `faostatdb.toml` is loaded, then overridden by environment variables (read
+   from `secrets.env` if present), then by CLI flags (`_apply_build_overrides`).
 2. **Select** — `metadata.fetch_and_parse()` downloads and parses
    `datasets_E.json`; `metadata.select_datasets()` reduces it to the chosen
    datasets per the `[datasets]` config.
@@ -97,63 +96,58 @@ installed `faostatdb` command or `python -m faostatdb` (via
 
 | What | Where | Lifetime |
 | --- | --- | --- |
-| **Output database** | `build.database` (default `./faostat.duckdb`) | permanent — this is the product |
-| **Downloaded archives** (`*.zip`) | the resolved `download_dir` (see below) | kept across runs for hot restart; removed after a successful build unless `--keep-archives` |
+| **Output database** | `$FABIO_DUCKDB_DIR/<build.database>` (see below) | permanent — this is the product, kept outside the repo |
+| **Downloaded archives** (`*.zip`) | the resolved `download_dir` — project-local `./faostat_temp_download/` by default | temporary; removed after a successful build unless `--keep-archives` |
 | **In-progress downloads** (`*.part`) | inside `download_dir` | transient — renamed to `*.zip` on completion |
 | **Download manifest** (`manifest.jsonl`) | `<download_dir>/.faostatdb-downloads/` | persists between runs to enable hot restart |
 | **Extracted CSVs** | a temp build dir under `download_dir` | deleted immediately after each import |
 
-The **`download_dir`** itself is resolved in this order (highest precedence first):
+The **output database** location is resolved from `build.database`:
+
+- An **absolute** path is used as-is.
+- A **bare filename** (the default, `faostat.duckdb`) is placed inside the
+  `FABIO_DUCKDB_DIR` environment variable. If that variable is unset, it falls
+  back to the OS data directory — never the repository — so a built database is
+  never committed by accident.
+
+The **`download_dir`** (raw, temporary archives) is resolved in this order
+(highest precedence first):
 
 1. `--download-dir DIR` (CLI) or `download_dir` in `faostatdb.toml`
-   — with `~`, `${VAR}`, and `%VAR%` expansion applied.
+   — with `~`, `${VAR}`, and `%VAR%` expansion applied. A relative path is taken
+   relative to the project, so the default `faostat_temp_download` lands in
+   `./faostat_temp_download/`.
 2. The `FAOSTATDB_DOWNLOAD_DIR` environment variable.
-3. `./faostatdb_archives/` (project-local) — only when `--keep-archives` is set.
-4. The OS cache directory — via `platformdirs` if installed, otherwise the system
-   temp dir (e.g. `%TEMP%\faostatdb` on Windows, `/tmp/faostatdb` elsewhere).
+3. `./faostat_temp_download/` (project-local).
 
-## Secrets: keeping `download_dir` out of the repo
+#### Setting the path via `secrets.env` (this repo's setup)
 
-`faostatdb.toml` is meant to be committed, so it should **not** contain a private
-or machine-specific path (a personal home directory, a mounted scratch volume, a
-CI runner path). Manage that path as a secret instead of hard-coding it:
+This repo keeps the machine-specific output path in a git-ignored
+[`secrets.env`](secrets.env) file. The final DuckDB is written under
+`FABIO_DUCKDB_DIR`. To point it at `C:\where\it\is\stored`, `secrets.env`
+contains:
 
-**Option A — reference an environment variable from the TOML** (recommended):
-
-```toml
-[build]
-download_dir = "${FAOSTATDB_DOWNLOAD_DIR}"
+```dotenv
+FABIO_DUCKDB_DIR=C:\where\it\is\stored
 ```
 
-Then set the real path in your environment, never in the committed file:
+FAOSTATdb loads `secrets.env` from the current directory automatically at
+startup, so you can just run the build — no manual sourcing required:
 
 ```bash
-# Linux / macOS — add to ~/.bashrc, ~/.zshrc, direnv .envrc, etc.
-export FAOSTATDB_DOWNLOAD_DIR="/mnt/data/faostat-cache"
+faostatdb build --yes
 ```
+
+Variables already set in your shell take precedence over `secrets.env`, so you
+can still override a single run from the command line:
 
 ```powershell
-# Windows PowerShell — current session
-$env:FAOSTATDB_DOWNLOAD_DIR = "D:\faostat-cache"
-# or persist for your user account:
-setx FAOSTATDB_DOWNLOAD_DIR "D:\faostat-cache"
+$env:FABIO_DUCKDB_DIR = "C:\elsewhere"; faostatdb build --yes
 ```
 
-If the variable is unset, the `${...}` reference is ignored and resolution falls
-through to the OS cache dir — so the committed config stays portable.
-
-**Option B — leave the TOML empty and set only the env var.** With
-`download_dir = ""`, `FAOSTATDB_DOWNLOAD_DIR` (if set) is used automatically; this
-is the natural fit for **CI/CD secret stores** (e.g. a GitHub Actions secret
-exported as an env var) and `.env` files.
-
-**Option C — pass it per-invocation** with `--download-dir DIR`, which overrides
-both the config and the env var and never touches any file.
-
-In all cases, keep caches out of version control. The archive cache, manifest,
-and `*.zip` files are already covered by [.gitignore](.gitignore); if you point
-`download_dir` at a folder inside the repo, add it there too, and keep `.env`
-files ignored.
+Keep `secrets.env` out of version control (it is already covered by
+[.gitignore](.gitignore)). See the [Configuration](#configuration) section for
+the full list of overridable variables.
 
 ## Querying the result
 
@@ -192,12 +186,35 @@ con = DBInterface.connect(DuckDB.DB, "faostat.duckdb")
 DataFrame(DBInterface.execute(con, "SELECT * FROM data_qcl LIMIT 10"))
 ```
 
-## Configuration (`faostatdb.toml`)
+## Configuration
+
+Configuration comes from two files, by design:
+
+- [`faostatdb.toml`](faostatdb.toml) — **committed** to the repo. It holds the
+  general, default configuration in its most generic shape: it is exactly what
+  you get when you clone the project. **You are not meant to edit it** for
+  machine-specific or personal settings — leave it alone so it stays clean and
+  pull-able.
+- [`secrets.env`](secrets.env) — **git-ignored**, your own. A simple
+  `KEY=value`-per-line file where you override whatever you need. FAOSTATdb loads
+  it automatically (from the current directory) at startup; values already set in
+  your shell environment are left untouched.
+
+Resolution order, lowest precedence first:
+
+1. `faostatdb.toml` (the committed defaults).
+2. Environment variables, loaded from `secrets.env` if present.
+3. CLI flags (e.g. `--jobs`, `--include`).
+
+So to change a value you do **not** edit `faostatdb.toml`; you add a line to
+`secrets.env`.
+
+### The committed defaults (`faostatdb.toml`)
 
 ```toml
 [build]
-database = "faostat.duckdb"
-download_dir = ""        # "" = OS cache; "${FAOSTATDB_DOWNLOAD_DIR}" = from env (see Secrets)
+database = "faostat.duckdb"             # filename; final DB is written under $FABIO_DUCKDB_DIR
+download_dir = "faostat_temp_download"  # temporary raw ZIPs, project-local, deleted after build
 keep_archives = false
 jobs = 6
 overwrite = false
@@ -207,6 +224,30 @@ mode = "all"            # all | include | exclude
 include = []
 exclude = ["FA", "CBH"]
 ```
+
+### Overriding via `secrets.env`
+
+Each value above maps to an environment variable. Set only the ones you want to
+change; everything else keeps its `faostatdb.toml` value.
+
+```dotenv
+# Output location (kept out of the repo) — see "Where files are stored" below.
+FABIO_DUCKDB_DIR=C:\where\it\is\stored
+
+# Any of these override the matching faostatdb.toml value:
+FAOSTATDB_DATABASE=faostat.duckdb
+FAOSTATDB_DOWNLOAD_DIR=faostat_temp_download
+FAOSTATDB_KEEP_ARCHIVES=false
+FAOSTATDB_JOBS=6
+FAOSTATDB_OVERWRITE=false
+FAOSTATDB_DATASETS_MODE=include            # all | include | exclude
+FAOSTATDB_DATASETS_INCLUDE=QCL,FBS         # comma-separated codes
+FAOSTATDB_DATASETS_EXCLUDE=FA,CBH          # comma-separated codes
+```
+
+Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; list variables are
+comma-separated. Run `faostatdb config show` to print the effective configuration
+after the TOML and `secrets.env` have been merged.
 
 ## Reproducibility
 
