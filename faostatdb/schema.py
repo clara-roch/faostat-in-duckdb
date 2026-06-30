@@ -157,7 +157,19 @@ CREATE TABLE IF NOT EXISTS faostat_build (
 """
 
 
+DDL_FAOSTAT_CONSTANT_COLUMN = """\
+CREATE TABLE IF NOT EXISTS faostat_constant_column (
+    dataset_code VARCHAR,
+    table_name   VARCHAR,
+    column_name  VARCHAR,
+    value        VARCHAR,
+    PRIMARY KEY (dataset_code, column_name)
+);
+"""
+
+
 def create_metadata_tables(con) -> None:
-    """Create the ``faostat_dataset`` / ``faostat_build`` tables if absent."""
+    """Create the metadata / provenance tables if absent."""
     con.execute(DDL_FAOSTAT_DATASET)
     con.execute(DDL_FAOSTAT_BUILD)
+    con.execute(DDL_FAOSTAT_CONSTANT_COLUMN)

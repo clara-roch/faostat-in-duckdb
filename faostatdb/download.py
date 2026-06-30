@@ -78,12 +78,28 @@ class Manifest:
             fh.write(json.dumps(asdict(entry)) + "\n")
 
     def needs_download(self, dataset_code: str, archive_path: Path) -> bool:
-        """True unless a valid, present archive already exists for this dataset."""
+        """True unless a present, presumed-good archive already exists.
+
+        A re-download is needed when there is no prior record, when the archive
+        file is gone from disk, or when the last recorded state is a known-bad
+        one (``failed`` / ``zip_invalid``) that warrants a fresh fetch. Once an
+        archive has been ``downloaded`` it is reused even if the build later
+        crashed before importing it: Phase 2 re-validates every archive with
+        ``testzip()`` anyway, so a corrupt reuse is caught and re-handled there
+        rather than forcing a blind re-download of everything.
+        """
         entry = self.get(dataset_code)
         if entry is None:
             return True
-        terminal_ok = {State.ZIP_VALID.value, State.IMPORTING.value, State.IMPORTED.value}
-        return not (entry.state in terminal_ok and archive_path.exists())
+        if not archive_path.exists():
+            return True
+        reusable = {
+            State.DOWNLOADED.value,
+            State.ZIP_VALID.value,
+            State.IMPORTING.value,
+            State.IMPORTED.value,
+        }
+        return entry.state not in reusable
 
 
 def download_file(url: str, dest: Path, *, timeout: float = 300.0) -> Path:

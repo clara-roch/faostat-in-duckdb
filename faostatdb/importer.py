@@ -13,7 +13,12 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .schema import dimension_groups, dimension_table_for, normalize_columns
+from .schema import (
+    DDL_FAOSTAT_CONSTANT_COLUMN,
+    dimension_groups,
+    dimension_table_for,
+    normalize_columns,
+)
 
 
 def detect_encoding(csv_path: Path) -> str:
@@ -98,13 +103,19 @@ def import_csv(con, csv_path: Path, dataset_code: str) -> ImportResult:
         f'"{raw}" AS {norm}' for raw, norm in zip(raw_cols, norm_cols)
     )
     con.execute(f'DROP TABLE IF EXISTS "{table}"')
+    # sample_size=-1 makes DuckDB scan the entire file before choosing column
+    # types. FAOSTAT code columns are identifiers (leading zeros, letters, dots,
+    # e.g. '210091F', 'SLC', '1842.01.02'); a small top-of-file sample mis-infers
+    # them as INT64 and the import fails on the first alphanumeric code. A full
+    # scan keeps such columns as text, preserving the source values exactly.
     con.execute(
         f'CREATE TABLE "{table}" AS '
-        f"SELECT {projection} FROM read_csv(?, header=true, encoding='{encoding}')",
+        f"SELECT {projection} FROM read_csv(?, header=true, encoding='{encoding}', sample_size=-1)",
         [str(csv_path)],
     )
     (count,) = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
     extract_dimensions(con, table, dataset_code, norm_cols)
+    extract_constant_columns(con, table, dataset_code)
     return ImportResult(dataset_code=dataset_code, table_name=table, row_count=count)
 
 
@@ -150,6 +161,70 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
         # Drop the now-redundant attribute columns from the fact table.
         for col in others:
             con.execute(f'ALTER TABLE "{table}" DROP COLUMN "{col}"')
+
+
+def extract_constant_columns(
+    con, table: str, dataset_code: str, protect: tuple[str, ...] = ("value",)
+) -> None:
+    """Drop columns that hold a single value across *every* row of ``table``.
+
+    A column whose value never varies carries no per-row information, so it is
+    removed from the fact table and its constant value recorded in
+    ``faostat_constant_column``. This is lossless — the value is reconstructable
+    from the metadata. The check scans the whole table (not a sample): a column is
+    only dropped if it is genuinely constant everywhere.
+
+    The ``value`` column is protected by default so a fact table always keeps its
+    measurement column, even in the degenerate case where every value is equal.
+    """
+    con.execute(DDL_FAOSTAT_CONSTANT_COLUMN)
+
+    cols = [d[0] for d in con.execute(f'SELECT * FROM "{table}" LIMIT 0').description]
+    checkable = [c for c in cols if c not in protect]
+    if not checkable:
+        return
+
+    # One full scan: total rows, plus non-null count and distinct count per column.
+    parts = ["COUNT(*)"]
+    for c in checkable:
+        parts.append(f'COUNT("{c}")')
+        parts.append(f'COUNT(DISTINCT "{c}")')
+    stats = con.execute(f'SELECT {", ".join(parts)} FROM "{table}"').fetchone()
+
+    n_rows = stats[0]
+    if n_rows == 0:
+        return
+
+    con.execute(
+        'DELETE FROM faostat_constant_column WHERE dataset_code = ? AND table_name = ?',
+        [dataset_code, table],
+    )
+
+    idx = 1
+    for c in checkable:
+        non_null, distinct = stats[idx], stats[idx + 1]
+        idx += 2
+        # Constant iff all rows are NULL (distinct == 0) or all rows share one
+        # non-null value (distinct == 1 and there are no NULLs). A mix of one
+        # value and some NULLs is NOT constant and is left in place.
+        all_null = distinct == 0
+        single_value = distinct == 1 and non_null == n_rows
+        if not (all_null or single_value):
+            continue
+
+        if all_null:
+            value = None
+        else:
+            (raw,) = con.execute(
+                f'SELECT "{c}" FROM "{table}" WHERE "{c}" IS NOT NULL LIMIT 1'
+            ).fetchone()
+            value = None if raw is None else str(raw)
+
+        con.execute(
+            'INSERT INTO faostat_constant_column VALUES (?, ?, ?, ?)',
+            [dataset_code, table, c, value],
+        )
+        con.execute(f'ALTER TABLE "{table}" DROP COLUMN "{c}"')
 
 
 def import_archive(con, archive: Path, dataset_code: str, build_dir: Path) -> ImportResult:

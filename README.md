@@ -230,8 +230,26 @@ The table is built directly from the dataset's main CSV:
   read_csv(...)`, projecting every source column through `"Raw Name" AS
   snake_name` so **no column is dropped and no value or flag is changed**.
 
-This is the v0.1 storage model: no dimension tables and no label removal yet
-(those are deferred to v0.2). Every dataset stands alone as a faithful copy.
+### Dimension tables (deduplicated labels)
+
+FAOSTAT repeats each dimension's attributes on every fact row — a single area
+carries `area_code` + `area_code_m49` + `area_label` across millions of rows.
+After the fact table is built, the importer moves these redundant attributes into
+shared `dim_<stem>` tables and keeps only the `<stem>_code` key in the fact table:
+
+- Any `<stem>_code` column with sibling attribute columns (the bare `<stem>` or
+  anything starting with `<stem>_`) becomes a dimension: `area`, `item`,
+  `element`, `year`, etc.
+- Each `dim_<stem>` table is keyed by `(dataset_code, <stem>_code)` — codes are
+  **not** globally unique across FAOSTAT domains, so the dataset code namespaces
+  them. Re-importing a dataset replaces only its own rows.
+- This removes storage-level duplication **without altering any value**: the
+  dimension table holds the exact source attributes, just deduplicated.
+
+So `data_qcl` keeps `area_code, item_code, element_code, year_code, unit, value,
+flag_code, note`, while `dim_area`, `dim_item`, `dim_year`, and `dim_element`
+hold the labels and alternate codes. See [Querying the result](#querying-the-result)
+for how to join them back.
 
 ### Column-name normalization
 
@@ -275,28 +293,49 @@ hash of the effective config — enough to reproduce and verify the build. The
 
 The output is a plain DuckDB file — query it from any language.
 
+> ⚠️ **Use the full path to the built database.** A bare `"faostat.duckdb"`
+> resolves relative to your current directory and will usually open the *wrong*
+> (or an empty, freshly-created) file. The build prints the exact path it wrote
+> on its final `done: … -> <path>` line, and that path is `$FABIO_DUCKDB_DIR/<build.database>`
+> (see [Where files are stored](#where-files-are-stored)). In the examples below,
+> replace the path with the one your build reported, e.g.
+> `C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb`.
+
+Fact tables keep only the dimension **codes** (`area_code`, `item_code`,
+`element_code`, `year_code`, …); the labels and alternate codes live once in
+`dim_<stem>` tables (`dim_area`, `dim_item`, `dim_year`, `dim_element`), keyed by
+`(dataset_code, <stem>_code)`. Join back to a `dim_` table to filter or display
+by label.
+
 **DuckDB CLI**
 
 ```sql
-SELECT area_label, year, value, flag_code
-FROM data_qcl
-WHERE item_label = 'Wheat'
-ORDER BY year;
+-- find the item code(s) whose label is Wheat, then query the fact table
+SELECT d.area_code, d.year_code, d.value, d.flag_code
+FROM data_qcl AS d
+JOIN dim_item AS i
+  ON i.dataset_code = 'QCL' AND i.item_code = d.item_code
+WHERE i.item_label = 'Wheat'
+ORDER BY d.year_code;
 ```
 
 **Python**
 
 ```python
 import duckdb
-con = duckdb.connect("faostat.duckdb")
+import pandas
+import numpy
+# Use the path your build printed on the final "done: ... -> <path>" line:
+con = duckdb.connect(r"C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb")
 df = con.execute("SELECT * FROM data_qcl LIMIT 10").df()
+labels = con.execute("SELECT * FROM dim_item WHERE dataset_code = 'QCL' LIMIT 10").df()
 ```
 
 **R**
 
 ```r
 library(duckdb)
-con <- dbConnect(duckdb(), "faostat.duckdb")
+con <- dbConnect(duckdb(), r"(C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb)")
 dbGetQuery(con, "SELECT * FROM data_qcl LIMIT 10")
 ```
 
@@ -304,7 +343,7 @@ dbGetQuery(con, "SELECT * FROM data_qcl LIMIT 10")
 
 ```julia
 using DuckDB, DataFrames
-con = DBInterface.connect(DuckDB.DB, "faostat.duckdb")
+con = DBInterface.connect(DuckDB.DB, raw"C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb")
 DataFrame(DBInterface.execute(con, "SELECT * FROM data_qcl LIMIT 10"))
 ```
 
