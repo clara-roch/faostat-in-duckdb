@@ -69,6 +69,60 @@ def normalize_columns(names: list[str]) -> list[str]:
     return out
 
 
+# --- Dimension extraction --------------------------------------------------
+#
+# FAOSTAT fact rows repeat dimension attributes on every line: a single area is
+# carried as ``area_code`` + ``area_code_m49`` + ``area_label`` on millions of
+# rows, an item as ``item_code`` + ``item_code_cpc`` + ``item_label``, a year as
+# ``year_code`` + ``year``. We keep only the ``<stem>_code`` key in the fact
+# table and move the redundant attribute columns into a shared ``dim_<stem>``
+# table (keyed by ``(dataset_code, <stem>_code)``). This removes storage-level
+# duplication without dropping or altering any source information.
+
+_CODE_SUFFIX = re.compile(r"^(?P<stem>.+)_code$")
+
+
+def dimension_groups(norm_cols: list[str]) -> list[tuple[str, str, list[str]]]:
+    """Identify dimension column groups among normalized fact-table columns.
+
+    A dimension is keyed by a ``<stem>_code`` column and groups every sibling
+    column that is the bare ``<stem>`` or starts with ``<stem>_`` (which includes
+    the key itself). Groups whose only member is the key are ignored — there is
+    nothing redundant to extract.
+
+    Returns a list of ``(stem, key_column, attribute_columns)`` tuples, where
+    ``attribute_columns`` are the redundant columns to move into ``dim_<stem>``.
+
+    Examples
+    --------
+    >>> dimension_groups(
+    ...     ["area_code", "area_code_m49", "area_label", "year_code", "year", "value"]
+    ... )
+    [('area', 'area_code', ['area_code_m49', 'area_label']), ('year', 'year_code', ['year'])]
+    >>> dimension_groups(["flag_code", "value"])
+    []
+    """
+    cols = list(norm_cols)
+    groups: list[tuple[str, str, list[str]]] = []
+    for key in cols:
+        m = _CODE_SUFFIX.match(key)
+        if not m:
+            continue
+        stem = m.group("stem")
+        members = [
+            c for c in cols if c == stem or c == key or c.startswith(f"{stem}_")
+        ]
+        others = [c for c in members if c != key]
+        if others:
+            groups.append((stem, key, others))
+    return groups
+
+
+def dimension_table_for(stem: str) -> str:
+    """Return the dimension-table name for a stem: ``dim_<stem>``."""
+    return f"dim_{stem}"
+
+
 # --- Metadata tables -------------------------------------------------------
 
 DDL_FAOSTAT_DATASET = """\
