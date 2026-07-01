@@ -1,4 +1,5 @@
-"""CSV extraction and DuckDB import.
+"""
+CSV extraction and DuckDB import.
 
 Each dataset's main CSV is extracted to a temp build dir, imported with DuckDB's
 ``read_csv`` into ``data_<code>`` (one fact table per dataset), and the extracted

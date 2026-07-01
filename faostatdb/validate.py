@@ -1,4 +1,5 @@
-"""Archive integrity validation.
+"""
+Archive integrity validation.
 
 Validation uses Python's stdlib ``zipfile.testzip()`` — never an external
 ``zip -T``. An optional size check compares the archive against the size declared

@@ -1,4 +1,5 @@
-"""Parallel download with a hot-restart manifest and retry/backoff.
+"""
+Parallel download with a hot-restart manifest and retry/backoff.
 
 State machine (recorded per dataset in ``manifest.jsonl``)::
 

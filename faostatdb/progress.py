@@ -1,4 +1,5 @@
-"""Human- and machine-readable progress reporting.
+"""
+Human- and machine-readable progress reporting.
 
 FAOSTATdb.md ("Progress UI: useful, but should degrade gracefully") asks for a
 package-manager-style display that *degrades*: rich progress bars when available,

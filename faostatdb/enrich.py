@@ -1,4 +1,5 @@
-"""Optional, clearly-separated enrichment layers (NOT source FAOSTAT content).
+"""
+Optional, clearly-separated enrichment layers (NOT source FAOSTAT content).
 
 FAOSTATdb.md ("Country metadata: useful, but separate source-derived from
 package-derived") is emphatic: enrichment must be opt-in and must never be

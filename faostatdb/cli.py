@@ -1,4 +1,5 @@
-"""Command-line interface: argument parsing and command dispatch.
+"""
+Command-line interface: argument parsing and command dispatch.
 
 Commands: ``list``, ``tables``, ``config show|init``, ``build``, ``info``,
 ``validate``, ``clean-cache``, ``sql``, ``self-contained`` and ``bench``. The CLI

@@ -1,4 +1,5 @@
-"""Fetch and parse FAOSTAT bulk metadata; dataset selection.
+"""
+Fetch and parse FAOSTAT bulk metadata; dataset selection.
 
 The bulk inventory lives at
 ``https://bulks-faostat.fao.org/production/datasets_E.json`` and drives selection,

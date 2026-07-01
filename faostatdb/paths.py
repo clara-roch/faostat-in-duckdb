@@ -1,4 +1,5 @@
-"""Path resolution for raw archives and the output database.
+"""
+Path resolution for raw archives and the output database.
 
 Two distinct locations:
 

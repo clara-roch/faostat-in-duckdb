@@ -1,4 +1,5 @@
-"""Compact a finished DuckDB file to the smallest possible size.
+"""
+Compact a finished DuckDB file to the smallest possible size.
 
 Why this exists: DuckDB's ``ALTER TABLE ... DROP COLUMN`` is a *catalog* change.
 The dropped column's data stays in the existing row groups on disk, and a plain

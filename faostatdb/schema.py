@@ -1,4 +1,5 @@
-"""Column-name normalization, dimension logic, and metadata-table DDL.
+"""
+Column-name normalization, dimension logic, and metadata-table DDL.
 
 Source preservation is the prime directive: we normalize *names* to stable
 ``snake_case`` but never drop columns or alter values. Storage-level duplication

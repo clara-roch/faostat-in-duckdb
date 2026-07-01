@@ -1,4 +1,5 @@
-"""Download-concurrency benchmarking (FAOSTATdb.md v0.3 > "Benchmarking of concurrency").
+"""
+Download-concurrency benchmarking (FAOSTATdb.md v0.3 > "Benchmarking of concurrency").
 
 The one concurrency knob in FAOSTATdb is ``build.jobs`` — how many archives are
 downloaded in parallel. FAOSTATdb.md deliberately refuses to hard-code an

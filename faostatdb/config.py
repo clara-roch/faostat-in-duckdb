@@ -1,4 +1,5 @@
-"""Configuration: load the shipped ``faostatdb.toml``, then apply ``secrets.env``.
+"""
+Configuration: load the shipped ``faostatdb.toml``, then apply ``secrets.env``.
 
 The repository ships a single ``faostatdb.toml`` holding the general, default
 configuration — that is what people get when they clone the project. It is meant
