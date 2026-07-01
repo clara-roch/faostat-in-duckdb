@@ -2,9 +2,10 @@
 
 Two distinct locations:
 
-* **Raw ZIP archives** are *temporary* and live in the project by default
-  (``./faostat_temp_download/``). They are deleted after a successful build unless
-  ``keep_archives`` is set. See :func:`resolve_download_dir`.
+* **Raw ZIP archives** live in a *cache* directory. By default we keep them (so a
+  re-run reuses them instead of re-downloading — see FAOSTATdb.md > hot restart),
+  which means the project-local ``./faostat_temp_download/`` by default. See
+  :func:`resolve_download_dir`.
 * **The final ``.duckdb``** is written *outside* the repository, in the directory
   named by the ``FABIO_DUCKDB_DIR`` environment variable. See
   :func:`resolve_database_path`.
@@ -14,7 +15,8 @@ Download-dir resolution order (highest precedence first):
 1. ``--download-dir DIR`` (explicit CLI flag / config ``download_dir``), with
    ``${VAR}`` / ``%VAR%`` / ``~`` expansion applied.
 2. ``FAOSTATDB_DOWNLOAD_DIR`` environment variable.
-3. Project-local ``./faostat_temp_download/``.
+3. If keeping archives: project-local ``./faostat_temp_download/``.
+4. Otherwise: an OS-appropriate cache directory (never the repo).
 
 The download manifest always lives under ``<download_dir>/.faostatdb-downloads/``.
 """
@@ -22,6 +24,7 @@ The download manifest always lives under ``<download_dir>/.faostatdb-downloads/`
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -39,14 +42,22 @@ def resolve_download_dir(
     keep_archives: bool = False,
     cwd: Path | None = None,
 ) -> Path:
-    """Resolve the directory where raw archives are downloaded (temporary).
+    """Resolve the directory where raw archives are downloaded / cached.
 
-    The directory is created if necessary. A relative path is resolved against
-    ``cwd`` so archives stay inside the project by default.
+    The directory is created if necessary. A relative explicit/env path is
+    resolved against ``cwd`` so archives stay inside the project by default.
+    When neither an explicit path nor the env var is set, the location depends on
+    ``keep_archives``: project-local when we mean to keep them around, otherwise
+    an OS cache dir so they don't clutter the working tree.
     """
     base = cwd or Path.cwd()
     chosen = _expand(explicit) or _expand(os.environ.get(ENV_DOWNLOAD_DIR))
-    resolved = Path(chosen).expanduser() if chosen else base / PROJECT_LOCAL_DIRNAME
+    if chosen:
+        resolved = Path(chosen).expanduser()
+    elif keep_archives:
+        resolved = base / PROJECT_LOCAL_DIRNAME
+    else:
+        resolved = _os_cache_dir()
     if not resolved.is_absolute():
         resolved = base / resolved
     resolved.mkdir(parents=True, exist_ok=True)
@@ -94,6 +105,7 @@ def _expand(value: str | None) -> str | None:
 
 
 def _os_cache_dir() -> Path:
+    """OS-appropriate cache dir (``platformdirs`` if available, else tempdir)."""
     try:
         from platformdirs import user_cache_dir  # type: ignore
 
@@ -103,6 +115,7 @@ def _os_cache_dir() -> Path:
 
 
 def _os_data_dir() -> Path:
+    """OS-appropriate data dir (``platformdirs`` if available, else tempdir)."""
     try:
         from platformdirs import user_data_dir  # type: ignore
 
@@ -116,3 +129,28 @@ def manifest_path(download_dir: Path) -> Path:
     d = download_dir / MANIFEST_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
     return d / MANIFEST_FILENAME
+
+
+def clean_cache(download_dir: Path) -> tuple[int, int]:
+    """Delete cached archives and the manifest under ``download_dir``.
+
+    Removes every ``*.zip`` / ``*.part`` in the directory and the whole
+    ``.faostatdb-downloads`` manifest/build subdir. Returns
+    ``(archives_removed, bytes_freed)`` for reporting. Used by ``faostatdb
+    clean-cache``.
+    """
+    removed = 0
+    freed = 0
+    if download_dir.is_dir():
+        for pattern in ("*.zip", "*.part"):
+            for f in download_dir.glob(pattern):
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    manifest_dir = download_dir / MANIFEST_DIRNAME
+    if manifest_dir.is_dir():
+        shutil.rmtree(manifest_dir, ignore_errors=True)
+    return removed, freed

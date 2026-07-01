@@ -1,8 +1,13 @@
 """Command-line interface: argument parsing and command dispatch.
 
-Commands (v0.1): ``list``, ``config show``, ``build``. The CLI resolves
+Commands: ``list``, ``tables``, ``config show|init``, ``build``, ``info``,
+``validate``, ``clean-cache``, ``sql`` and ``self-contained``. The CLI resolves
 configuration (``faostatdb.toml`` < ``secrets.env`` env vars < flags), then
 delegates to the relevant modules.
+
+Read the module top-to-bottom as the pipeline: :func:`main` parses args and
+dispatches; :func:`run_build` is the download → validate → import → enrich →
+record → compact driver.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from .config import Config, DatasetsConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construct the full argument parser (all commands and their flags)."""
     parser = argparse.ArgumentParser(
         prog="faostatdb",
         description="Build a local, source-preserving DuckDB mirror of FAOSTAT bulk data.",
@@ -24,52 +30,116 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # list
+    # list -----------------------------------------------------------------
     p_list = sub.add_parser("list", help="list available datasets")
     p_list.add_argument(
         "--remote", action="store_true", help="fetch the live remote inventory"
     )
 
-    # tables
+    # tables ---------------------------------------------------------------
     p_tables = sub.add_parser("tables", help="list tables in a built database")
     p_tables.add_argument("--database", default=None, help="DuckDB path to inspect")
 
-    # config
+    # config ---------------------------------------------------------------
     p_config = sub.add_parser("config", help="manage configuration")
     config_sub = p_config.add_subparsers(dest="config_command", required=True)
     config_sub.add_parser("show", help="print the effective configuration")
+    p_config_init = config_sub.add_parser(
+        "init", help="write a default faostatdb.toml in the current directory"
+    )
+    p_config_init.add_argument(
+        "--force", action="store_true", help="overwrite an existing faostatdb.toml"
+    )
 
-    # build
+    # build ----------------------------------------------------------------
     p_build = sub.add_parser("build", help="download and import datasets")
     p_build.add_argument("--database", default=None, help="output DuckDB path")
     p_build.add_argument("--include", default=None, help="comma-separated codes to include")
     p_build.add_argument("--exclude", default=None, help="comma-separated codes to exclude")
     p_build.add_argument("--jobs", type=int, default=None, help="parallel download jobs")
     p_build.add_argument("--keep-archives", action="store_true", help="keep ZIPs after build")
+    p_build.add_argument(
+        "--no-keep-archives",
+        action="store_true",
+        help="delete ZIPs after a successful build",
+    )
     p_build.add_argument("--download-dir", default=None, help="archive download directory")
-    p_build.add_argument("--yes", action="store_true", help="assume yes for prompts")
+    p_build.add_argument("--yes", "--all", action="store_true", help="assume yes for prompts")
     p_build.add_argument("--strict", action="store_true", help="fail build on any error")
+    p_build.add_argument(
+        "--no-compact", action="store_true", help="skip the final compaction pass"
+    )
+    p_build.add_argument(
+        "--keep-raw-tables", action="store_true", help="keep untouched raw_<code> tables"
+    )
+    p_build.add_argument(
+        "--enrich-areas",
+        action="store_true",
+        help="add the optional (non-source) area classification table",
+    )
+    p_build.add_argument("--json", action="store_true", help="emit JSON-lines progress")
+    p_build.add_argument("--ascii", action="store_true", help="use ASCII status icons")
+    p_build.add_argument(
+        "--no-progress", action="store_true", help="suppress animated progress bars"
+    )
+
+    # info -----------------------------------------------------------------
+    p_info = sub.add_parser("info", help="summarize a built database")
+    p_info.add_argument("database", nargs="?", default=None, help="DuckDB path")
+
+    # validate -------------------------------------------------------------
+    p_validate = sub.add_parser("validate", help="check a built database's integrity")
+    p_validate.add_argument("database", nargs="?", default=None, help="DuckDB path")
+
+    # clean-cache ----------------------------------------------------------
+    p_clean = sub.add_parser("clean-cache", help="delete cached archives + manifest")
+    p_clean.add_argument("--download-dir", default=None, help="archive download directory")
+
+    # sql ------------------------------------------------------------------
+    p_sql = sub.add_parser("sql", help="run a SQL query against a built database")
+    p_sql.add_argument("query", help="SQL to execute (e.g. 'SELECT * FROM faostat_dataset')")
+    p_sql.add_argument("--database", default=None, help="DuckDB path")
+
+    # self-contained -------------------------------------------------------
+    p_self = sub.add_parser(
+        "self-contained", help="build a single-file executable (.pyz) launcher"
+    )
+    p_self.add_argument(
+        "--output", "-o", default="faostatdb.pyz", help="output .pyz path"
+    )
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, load config, and dispatch to the chosen command."""
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = config_mod.load_config()
 
-    if args.command == "list":
-        return _cmd_list(args, cfg)
-    if args.command == "tables":
-        return _cmd_tables(args, cfg)
-    if args.command == "config":
-        return _cmd_config(args, cfg)
-    if args.command == "build":
-        return _cmd_build(args, cfg)
-    parser.error(f"unknown command: {args.command}")
-    return 2
+    dispatch = {
+        "list": _cmd_list,
+        "tables": _cmd_tables,
+        "config": _cmd_config,
+        "build": _cmd_build,
+        "info": _cmd_info,
+        "validate": _cmd_validate,
+        "clean-cache": _cmd_clean_cache,
+        "sql": _cmd_sql,
+        "self-contained": _cmd_self_contained,
+    }
+    handler = dispatch.get(args.command)
+    if handler is None:
+        parser.error(f"unknown command: {args.command}")
+        return 2
+    return handler(args, cfg)
+
+
+# --- list / tables ----------------------------------------------------------
 
 
 def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
+    """Print the datasets the current selection would build."""
     snapshot = metadata_mod.fetch_and_parse()
     selected = metadata_mod.select_datasets(snapshot.datasets, cfg.datasets)
     for d in selected:
@@ -79,6 +149,7 @@ def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _cmd_tables(args: argparse.Namespace, cfg: Config) -> int:
+    """List every table/view in a built database with an estimated row count."""
     import duckdb
 
     from . import paths as paths_mod
@@ -108,27 +179,57 @@ def _cmd_tables(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+# --- config -----------------------------------------------------------------
+
+
 def _cmd_config(args: argparse.Namespace, cfg: Config) -> int:
+    """``config show`` prints the effective config; ``config init`` writes a TOML."""
     if args.config_command == "show":
         print(config_mod.config_to_toml(cfg))
         return 0
+    if args.config_command == "init":
+        return _config_init(args)
     return 2
 
 
+def _config_init(args: argparse.Namespace) -> int:
+    """Write a default ``faostatdb.toml`` into the current directory."""
+    from pathlib import Path
+
+    target = Path.cwd() / config_mod.CONFIG_FILENAME
+    if target.exists() and not args.force:
+        print(f"{target} already exists (use --force to overwrite)", file=sys.stderr)
+        return 1
+    # Render the built-in defaults so a fresh file matches the shipped shape.
+    target.write_text(config_mod.config_to_toml(config_mod.default_config()), encoding="utf-8")
+    print(f"wrote {target}")
+    return 0
+
+
+# --- build ------------------------------------------------------------------
+
+
 def _cmd_build(args: argparse.Namespace, cfg: Config) -> int:
+    """Apply CLI overrides, then run the build driver."""
+    from . import progress
+
     cfg = _apply_build_overrides(args, cfg)
-    return run_build(cfg, assume_yes=args.yes, strict=args.strict)
+    reporter = progress.Reporter(
+        json_mode=args.json, ascii_mode=args.ascii, no_progress=args.no_progress
+    )
+    return run_build(cfg, assume_yes=args.yes, strict=args.strict, reporter=reporter)
 
 
-def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
-    """Wire download -> validate -> import -> metadata for the selected datasets.
+def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> int:
+    """Wire download -> validate -> import -> enrich -> record -> compact.
 
     Drives the per-dataset state machine recorded in the download manifest:
     archives are downloaded in parallel (with hot restart of already-valid
     archives), validated with ``zipfile.testzip()``, then imported sequentially
-    into one ``data_<code>`` fact table each. Source metadata and build
-    provenance are persisted to ``faostat_dataset`` / ``faostat_build``, and
-    valid archives are deleted on success unless ``keep_archives`` is set.
+    into one ``data_<code>`` fact table each (plus dimension tables, flag legend,
+    labelled views). Source metadata and build provenance are persisted to the
+    ``faostat_*`` tables. On success the database is compacted to reclaim space,
+    and valid archives are deleted unless ``keep_archives`` is set.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
@@ -136,10 +237,12 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
     from . import download as download_mod
     from . import importer as importer_mod
     from . import paths as paths_mod
-    from . import progress
+    from . import progress as progress_mod
     from . import schema as schema_mod
     from . import validate as validate_mod
     from .download import ManifestEntry, State
+
+    reporter = reporter or progress_mod.Reporter()
 
     snapshot = metadata_mod.fetch_and_parse()
     selected = metadata_mod.select_datasets(snapshot.datasets, cfg.datasets)
@@ -155,14 +258,16 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
     download_dir = paths_mod.resolve_download_dir(
         cfg.build.download_dir or None, keep_archives=cfg.build.keep_archives
     )
-    progress.log(
+    jobs = config_mod.resolve_jobs(cfg.build.jobs)
+    reporter.log(
         f"building {cfg.build.database} from {len(selected)} dataset(s) "
-        f"(archives in {download_dir})"
+        f"(archives cached in {download_dir}, {jobs} download job(s))"
     )
 
     manifest = download_mod.Manifest(paths_mod.manifest_path(download_dir))
 
     def archive_path_for(rec) -> Path:
+        # Prefer the archive's real filename from its URL; fall back to <CODE>.zip.
         name = None
         if rec.file_location:
             name = rec.file_location.rstrip("/").rsplit("/", 1)[-1]
@@ -178,11 +283,13 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
         for rec in selected
         if rec.file_location and manifest.needs_download(rec.code, archives[rec.code])
     ]
-    skipped = len(selected) - len(to_download) - sum(
-        1 for rec in selected if not rec.file_location
+    reused = sum(
+        1
+        for rec in selected
+        if rec.file_location and not manifest.needs_download(rec.code, archives[rec.code])
     )
-    if skipped > 0:
-        progress.log(f"reusing {skipped} already-downloaded archive(s)")
+    if reused:
+        reporter.log(f"reusing {reused} already-cached archive(s)")
 
     download_failed: set[str] = set()
     for rec in to_download:
@@ -192,49 +299,58 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                 state=State.DOWNLOADING.value,
                 archive_path=str(archives[rec.code]),
                 url=rec.file_location,
+                expected_size=rec.file_size,
+                expected_rows=rec.file_rows,
+                attempts=manifest.attempts(rec.code) + 1,
             ),
             now=_now(),
         )
+        reporter.event(rec.code, "download", "downloading")
 
-    jobs = max(1, cfg.build.jobs)
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {
-            pool.submit(
-                download_mod.download_with_retry, rec.file_location, archives[rec.code]
-            ): rec
-            for rec in to_download
-        }
-        for future in as_completed(futures):
-            rec = futures[future]
-            try:
-                future.result()
-            except Exception as exc:  # noqa: BLE001 — recorded per-dataset
-                download_failed.add(rec.code)
-                manifest.update(
-                    ManifestEntry(
-                        dataset_code=rec.code,
-                        state=State.FAILED.value,
-                        archive_path=str(archives[rec.code]),
-                        url=rec.file_location,
-                        error=f"download: {exc}",
-                    ),
-                    now=_now(),
-                )
-                progress.log(f"✗ {rec.code}: download failed: {exc}")
-                if strict:
-                    print(f"strict: download failed for {rec.code}", file=sys.stderr)
-                    return 1
-            else:
-                manifest.update(
-                    ManifestEntry(
-                        dataset_code=rec.code,
-                        state=State.DOWNLOADED.value,
-                        archive_path=str(archives[rec.code]),
-                        url=rec.file_location,
-                    ),
-                    now=_now(),
-                )
-                progress.log(f"✓ {rec.code}: downloaded")
+    with reporter.download_phase(len(to_download)) as tracker:
+        def worker(rec):
+            tracker.start(rec.code, metadata_mod.parse_size_bytes(rec.file_size))
+            return download_mod.download_with_retry(
+                rec.file_location,
+                archives[rec.code],
+                on_progress=lambda done, total: tracker.advance(rec.code, done, total),
+            )
+
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = {pool.submit(worker, rec): rec for rec in to_download}
+            for future in as_completed(futures):
+                rec = futures[future]
+                tracker.finish(rec.code)
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001 — recorded per-dataset
+                    download_failed.add(rec.code)
+                    manifest.update(
+                        ManifestEntry(
+                            dataset_code=rec.code,
+                            state=State.FAILED.value,
+                            archive_path=str(archives[rec.code]),
+                            url=rec.file_location,
+                            error=f"download: {exc}",
+                        ),
+                        now=_now(),
+                    )
+                    reporter.event(rec.code, "download", "failed", message=f"download failed: {exc}")
+                    if strict:
+                        print(f"strict: download failed for {rec.code}", file=sys.stderr)
+                        return 1
+                else:
+                    manifest.update(
+                        ManifestEntry(
+                            dataset_code=rec.code,
+                            state=State.DOWNLOADED.value,
+                            archive_path=str(archives[rec.code]),
+                            url=rec.file_location,
+                            downloaded_at=_now(),
+                        ),
+                        now=_now(),
+                    )
+                    reporter.event(rec.code, "download", "downloaded")
 
     # --- Phase 2: validate + import sequentially into DuckDB -----------------
     import duckdb
@@ -242,22 +358,26 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
     db_path = paths_mod.resolve_database_path(cfg.build.database)
     if cfg.build.overwrite and db_path.exists():
         db_path.unlink()
+        db_path.with_name(db_path.name + ".wal").unlink(missing_ok=True)
 
     build_dir = download_dir / paths_mod.MANIFEST_DIRNAME / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
 
     con = duckdb.connect(str(db_path))
+    _configure_duckdb(con, cfg)
     build_id = _build_id()
     started_at = _now()
     imported: list[str] = []
     failed: list[str] = []
+    downloaded_at = {e.dataset_code: e.downloaded_at for e in manifest.all()}
     try:
         schema_mod.create_metadata_tables(con)
         for rec in selected:
             archive = archives[rec.code]
-            if rec.code in download_failed:
+            dl_at = downloaded_at.get(rec.code)
+            if rec.code in download_failed or not rec.file_location:
                 failed.append(rec.code)
-                _record_dataset(con, rec, snapshot, archive, None, "failed")
+                _record_dataset(con, rec, snapshot, archive, None, "failed", dl_at, None)
                 continue
             if not archive.exists():
                 failed.append(rec.code)
@@ -271,8 +391,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                     ),
                     now=_now(),
                 )
-                _record_dataset(con, rec, snapshot, archive, None, "failed")
-                progress.log(f"✗ {rec.code}: archive missing")
+                _record_dataset(con, rec, snapshot, archive, None, "failed", dl_at, None)
+                reporter.event(rec.code, "validate", "failed", message="archive missing")
                 if strict:
                     return 1
                 continue
@@ -290,8 +410,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                     ),
                     now=_now(),
                 )
-                _record_dataset(con, rec, snapshot, archive, None, "zip_invalid")
-                progress.log(f"✗ {rec.code}: invalid archive: {result.reason}")
+                _record_dataset(con, rec, snapshot, archive, None, "zip_invalid", dl_at, None)
+                reporter.event(rec.code, "validate", "invalid", message=f"invalid archive: {result.reason}")
                 if strict:
                     return 1
                 continue
@@ -307,7 +427,9 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                 now=_now(),
             )
             try:
-                imp = importer_mod.import_archive(con, archive, rec.code, build_dir)
+                imp = importer_mod.import_archive(
+                    con, archive, rec.code, build_dir, keep_raw=cfg.build.keep_raw_tables
+                )
             except Exception as exc:  # noqa: BLE001 — recorded per-dataset
                 failed.append(rec.code)
                 manifest.update(
@@ -321,8 +443,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                     ),
                     now=_now(),
                 )
-                _record_dataset(con, rec, snapshot, archive, result.sha256, "failed")
-                progress.log(f"✗ {rec.code}: import failed: {exc}")
+                _record_dataset(con, rec, snapshot, archive, result.sha256, "failed", dl_at, None)
+                reporter.event(rec.code, "import", "failed", message=f"import failed: {exc}")
                 if strict:
                     return 1
                 continue
@@ -338,23 +460,53 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
                 ),
                 now=_now(),
             )
-            _record_dataset(con, rec, snapshot, archive, result.sha256, "imported")
-            progress.log(f"✓ {rec.code}: imported {imp.row_count:,} rows into {imp.table_name}")
+            _record_dataset(
+                con, rec, snapshot, archive, result.sha256, "imported", dl_at, imp.row_count
+            )
+            # Row-count sanity check against the declared FileRows (advisory).
+            _check_row_count(rec, imp.row_count, reporter)
+            reporter.event(
+                rec.code,
+                "import",
+                "imported",
+                rows=imp.row_count,
+                message=f"imported {imp.row_count:,} rows into {imp.table_name}",
+            )
 
-            # Archive is now fully imported into the database; drop it unless the
-            # user asked to keep archives. Done per-dataset so a later failure in
-            # the build doesn't strand already-imported archives on disk.
+            # Archive is now fully imported; drop it unless the user asked to keep
+            # archives. Done per-dataset so a later failure doesn't strand
+            # already-imported archives on disk.
             if not cfg.build.keep_archives:
                 archive.unlink(missing_ok=True)
 
-        _record_build(con, build_id, started_at, snapshot, cfg)
+        # Optional enrichment (clearly non-source; opt-in).
+        if cfg.enrichment.area_classification:
+            from . import enrich as enrich_mod
+
+            n = enrich_mod.enrich_areas(con)
+            if n:
+                reporter.log(f"enriched {n:,} area(s) into area_classification")
+
+        _record_build(con, build_id, started_at, snapshot, cfg, len(imported), len(failed))
+        con.execute("CHECKPOINT")
     finally:
         con.close()
 
-    # --- Phase 3: report -----------------------------------------------------
-    # (Successfully-imported archives were already deleted in Phase 2 unless
-    # keep_archives is set; failed datasets keep their archives for hot restart.)
-    progress.log(
+    # --- Phase 3: compact + report ------------------------------------------
+    if cfg.build.compact and imported:
+        from . import compact as compact_mod
+
+        try:
+            before, after = compact_mod.compact_database(db_path)
+            saved = before - after
+            reporter.log(
+                f"compacted database: {_human_bytes(before)} -> {_human_bytes(after)} "
+                f"(saved {_human_bytes(saved)})"
+            )
+        except Exception as exc:  # noqa: BLE001 — compaction is best-effort
+            reporter.log(f"compaction skipped ({exc})")
+
+    reporter.log(
         f"done: {len(imported)} imported, {len(failed)} failed -> {db_path}"
     )
     if failed:
@@ -363,58 +515,289 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool) -> int:
     return 0
 
 
+# --- info / validate / clean-cache / sql / self-contained -------------------
+
+
+def _cmd_info(args: argparse.Namespace, cfg: Config) -> int:
+    """Print a reproducibility summary of a built database (FAOSTATdb.md > info)."""
+    import duckdb
+
+    from . import paths as paths_mod
+
+    db_path = paths_mod.resolve_database_path(args.database or cfg.build.database)
+    if not db_path.exists():
+        print(f"database not found: {db_path}", file=sys.stderr)
+        return 1
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        n_datasets = _scalar(con, "SELECT COUNT(*) FROM faostat_dataset WHERE import_status = 'imported'")
+        n_failed = _scalar(con, "SELECT COUNT(*) FROM faostat_dataset WHERE import_status <> 'imported'")
+        build = con.execute(
+            "SELECT build_id, completed_at, faostatdb_version, duckdb_version, "
+            "python_version, os, metadata_snapshot_sha256 "
+            "FROM faostat_build ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+    except duckdb.Error:
+        print(f"{db_path} is not a FAOSTATdb database (no metadata tables)", file=sys.stderr)
+        con.close()
+        return 1
+    finally:
+        con.close()
+
+    print(f"FAOSTATdb database: {db_path}")
+    print(f"Size on disk:       {_human_bytes(db_path.stat().st_size)}")
+    print(f"Datasets:           {n_datasets}")
+    print(f"Failed datasets:    {n_failed}")
+    if build:
+        (bid, completed, fver, dver, pyver, os_, meta_sha) = build
+        print(f"Built at:           {completed}")
+        print(f"Build id:           {bid}")
+        print(f"FAOSTATdb version:  {fver}")
+        print(f"DuckDB version:     {dver}")
+        print(f"Python version:     {pyver}")
+        print(f"OS:                 {os_}")
+        print(f"Metadata SHA256:    {meta_sha}")
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace, cfg: Config) -> int:
+    """Check a built database opens and that each fact table is queryable."""
+    import duckdb
+
+    from . import paths as paths_mod
+
+    db_path = paths_mod.resolve_database_path(args.database or cfg.build.database)
+    if not db_path.exists():
+        print(f"database not found: {db_path}", file=sys.stderr)
+        return 1
+
+    problems = 0
+    facts: list[str] = []
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        facts = [
+            r[0]
+            for r in con.execute(
+                "SELECT table_name FROM duckdb_tables() "
+                "WHERE table_name LIKE 'data\\_%' ESCAPE '\\' ORDER BY table_name"
+            ).fetchall()
+        ]
+        if not facts:
+            print("no data_<code> fact tables found", file=sys.stderr)
+            problems += 1
+        for t in facts:
+            try:
+                n = _scalar(con, f'SELECT COUNT(*) FROM "{t}"')
+                if n == 0:
+                    print(f"warning: {t} has 0 rows", file=sys.stderr)
+                    problems += 1
+            except duckdb.Error as exc:
+                print(f"error: {t} not queryable: {exc}", file=sys.stderr)
+                problems += 1
+    finally:
+        con.close()
+
+    if problems:
+        print(f"validate: {problems} problem(s) in {db_path}", file=sys.stderr)
+        return 1
+    print(f"validate: OK ({len(facts)} fact table(s)) -> {db_path}")
+    return 0
+
+
+def _cmd_clean_cache(args: argparse.Namespace, cfg: Config) -> int:
+    """Delete cached archives + manifest from the download directory."""
+    from . import paths as paths_mod
+
+    download_dir = paths_mod.resolve_download_dir(
+        args.download_dir or cfg.build.download_dir or None,
+        keep_archives=cfg.build.keep_archives,
+    )
+    removed, freed = paths_mod.clean_cache(download_dir)
+    print(f"removed {removed} archive(s), freed {_human_bytes(freed)} from {download_dir}")
+    return 0
+
+
+def _cmd_sql(args: argparse.Namespace, cfg: Config) -> int:
+    """Run a one-off SQL query against a built database (read-only)."""
+    import duckdb
+
+    from . import paths as paths_mod
+
+    db_path = paths_mod.resolve_database_path(args.database or cfg.build.database)
+    if not db_path.exists():
+        print(f"database not found: {db_path}", file=sys.stderr)
+        return 1
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        rel = con.execute(args.query)
+        headers = [d[0] for d in rel.description] if rel.description else []
+        rows = rel.fetchall()
+    except duckdb.Error as exc:
+        print(f"query error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        con.close()
+    _print_table(headers, rows)
+    return 0
+
+
+def _print_table(headers: list[str], rows: list[tuple]) -> None:
+    """Print query results as a simple aligned text table (no pandas needed)."""
+    if not headers:
+        return
+    str_rows = [["" if v is None else str(v) for v in row] for row in rows]
+    widths = [len(h) for h in headers]
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("  ".join("-" * widths[i] for i in range(len(headers))))
+    for row in str_rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+    print(f"\n({len(rows)} row(s))")
+
+
+def _cmd_self_contained(args: argparse.Namespace, cfg: Config) -> int:
+    """Bundle the package into a single executable ``.pyz`` (stdlib zipapp).
+
+    The result runs with ``python faostatdb.pyz build ...`` and needs only
+    ``duckdb`` installed at runtime — a genuinely single-file launcher, per the
+    optional single-file workflow in FAOSTATdb.md.
+    """
+    import shutil
+    import tempfile
+    import zipapp
+    from pathlib import Path
+
+    pkg_dir = Path(__file__).resolve().parent
+    with tempfile.TemporaryDirectory() as tmp:
+        staging = Path(tmp) / "app"
+        shutil.copytree(pkg_dir, staging / "faostatdb")
+        # zipapp entry point: run the CLI's main().
+        (staging / "__main__.py").write_text(
+            "from faostatdb.cli import main\n"
+            "import sys\n"
+            "if __name__ == '__main__':\n"
+            "    sys.exit(main())\n",
+            encoding="utf-8",
+        )
+        out = Path(args.output)
+        zipapp.create_archive(staging, out, interpreter="/usr/bin/env python3")
+    print(f"wrote {out} (run: python {out} build --help)")
+    return 0
+
+
+# --- helpers ----------------------------------------------------------------
+
+
+def _configure_duckdb(con, cfg: Config) -> None:
+    """Apply the ``[performance]`` PRAGMAs to a build connection.
+
+    ``import_threads`` maps to DuckDB's ``threads`` and ``memory_limit`` to its
+    ``memory_limit``; both are left at DuckDB's own default when unset (0 / "").
+    """
+    if cfg.performance.import_threads and cfg.performance.import_threads > 0:
+        con.execute(f"PRAGMA threads={int(cfg.performance.import_threads)}")
+    if cfg.performance.memory_limit:
+        # Quote defensively; the value is user-supplied config.
+        limit = cfg.performance.memory_limit.replace("'", "")
+        con.execute(f"PRAGMA memory_limit='{limit}'")
+
+
 def _now() -> str:
+    """Current UTC time as an ISO-8601 string (used for manifest / metadata)."""
     import datetime
 
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def _build_id() -> str:
+    """A fresh random build id."""
     import uuid
 
     return uuid.uuid4().hex
 
 
-def _parse_size_bytes(value: str | None) -> int | None:
-    """Best-effort parse of FAOSTAT's human file-size string to bytes."""
-    if not value:
-        return None
-    text = value.strip().upper().replace(" ", "")
-    units = {"KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4, "B": 1}
-    for suffix, factor in units.items():
-        if text.endswith(suffix):
-            num = text[: -len(suffix)]
-            try:
-                return int(float(num) * factor)
-            except ValueError:
-                return None
-    try:
-        return int(float(text))
-    except ValueError:
-        return None
+def _scalar(con, sql: str):
+    """Fetch a single scalar from a query."""
+    row = con.execute(sql).fetchone()
+    return row[0] if row else None
 
 
-def _record_dataset(con, rec, snapshot, archive, archive_sha256, status: str) -> None:
-    size = archive.stat().st_size if archive.exists() else _parse_size_bytes(rec.file_size)
+def _human_bytes(n: int | None) -> str:
+    """Format a byte count as a short human-readable string."""
+    if n is None:
+        return "?"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _check_row_count(rec, rows_imported: int, reporter) -> None:
+    """Compare imported rows to the declared ``FileRows`` (advisory, non-fatal).
+
+    FAOSTAT's declared counts occasionally differ slightly from the delivered CSV,
+    so a mismatch is a *warning*, not a failure — unless the whole file imported
+    empty against a non-zero declared count, which likely signals a real problem.
+    """
+    declared = rec.file_rows
+    if declared is None:
+        return
+    if rows_imported == 0 and declared > 0:
+        reporter.event(
+            rec.code, "import", "invalid",
+            message=f"imported 0 rows but metadata declares {declared:,}",
+        )
+    elif abs(rows_imported - declared) > max(1, int(declared * 0.001)):
+        reporter.log(
+            f"note: {rec.code} imported {rows_imported:,} rows vs declared {declared:,}"
+        )
+
+
+def _record_dataset(
+    con, rec, snapshot, archive, archive_sha256, status, downloaded_at, rows_imported
+) -> None:
+    """Insert/replace one dataset's provenance row in ``faostat_dataset``."""
+    size = (
+        archive.stat().st_size
+        if archive.exists()
+        else metadata_mod.parse_size_bytes(rec.file_size)
+    )
     con.execute(
-        "INSERT OR REPLACE INTO faostat_dataset VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO faostat_dataset VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             rec.code,
             rec.dataset_name,
+            rec.topic,
+            rec.dataset_description,
+            rec.contact,
+            rec.email,
             rec.date_update,
+            rec.compression_format,
+            rec.file_type,
             rec.file_location,
             size,
             rec.file_rows,
-            None,
+            rows_imported,
+            downloaded_at,
             snapshot.url,
             snapshot.sha256,
+            rec.raw_json,
             archive_sha256,
             status,
         ],
     )
 
 
-def _record_build(con, build_id: str, started_at: str, snapshot, cfg: Config) -> None:
+def _record_build(
+    con, build_id, started_at, snapshot, cfg, n_imported, n_failed
+) -> None:
+    """Insert the build-provenance row into ``faostat_build``."""
     import hashlib
     import platform
 
@@ -424,7 +807,7 @@ def _record_build(con, build_id: str, started_at: str, snapshot, cfg: Config) ->
         config_mod.config_to_toml(cfg).encode("utf-8")
     ).hexdigest()
     con.execute(
-        "INSERT OR REPLACE INTO faostat_build VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO faostat_build VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             build_id,
             started_at,
@@ -436,20 +819,42 @@ def _record_build(con, build_id: str, started_at: str, snapshot, cfg: Config) ->
             snapshot.sha256,
             " ".join(sys.argv),
             config_sha256,
+            n_imported,
+            n_failed,
         ],
     )
 
 
 def _confirm(selected: list, cfg: Config) -> bool:
+    """Interactive pre-build confirmation, with an estimated-size summary.
+
+    Refuses to proceed without ``--yes`` when there is no TTY (so CI / scripts
+    must be explicit), per FAOSTATdb.md's "all by default may be too aggressive".
+    """
+    total_bytes = sum(
+        metadata_mod.parse_size_bytes(r.file_size) or 0 for r in selected
+    )
+    total_rows = sum(r.file_rows or 0 for r in selected)
+    print(
+        f"This will download {len(selected)} dataset(s) "
+        f"(~{_human_bytes(total_bytes)} compressed, ~{total_rows:,} rows) "
+        f"and build {cfg.build.database}.",
+        file=sys.stderr,
+    )
+    print(
+        "The database size depends on the data but is typically of a similar "
+        "order after compaction.",
+        file=sys.stderr,
+    )
     if not sys.stdin.isatty():
         print("non-interactive: pass --yes to build", file=sys.stderr)
         return False
-    answer = input(f"Build {len(selected)} dataset(s) into {cfg.build.database}? [y/N] ")
+    answer = input("Continue? [y/N] ")
     return answer.strip().lower() in {"y", "yes"}
 
 
 def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
-    """Layer CLI build flags over the loaded config."""
+    """Layer CLI build flags over the loaded config (flags win)."""
     from dataclasses import replace
 
     build = cfg.build
@@ -461,6 +866,16 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
         build = replace(build, jobs=args.jobs)
     if args.keep_archives:
         build = replace(build, keep_archives=True)
+    if args.no_keep_archives:
+        build = replace(build, keep_archives=False)
+    if args.no_compact:
+        build = replace(build, compact=False)
+    if args.keep_raw_tables:
+        build = replace(build, keep_raw_tables=True)
+
+    enrichment = cfg.enrichment
+    if args.enrich_areas:
+        enrichment = replace(enrichment, area_classification=True)
 
     datasets = cfg.datasets
     if args.include is not None:
@@ -471,8 +886,14 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
         datasets = DatasetsConfig(
             mode="exclude", include=datasets.include, exclude=_split_codes(args.exclude)
         )
-    return Config(build=build, datasets=datasets)
+    return Config(
+        build=build,
+        datasets=datasets,
+        performance=cfg.performance,
+        enrichment=enrichment,
+    )
 
 
 def _split_codes(value: str) -> list[str]:
+    """Split a comma-separated code list into cleaned upper-ish tokens."""
     return [c.strip() for c in value.split(",") if c.strip()]

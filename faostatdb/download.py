@@ -6,8 +6,10 @@ State machine (recorded per dataset in ``manifest.jsonl``)::
             -> importing -> imported | failed
 
 Archives download to ``*.part`` and are atomically renamed to ``*.zip`` on
-completion. Valid archives are reused across relaunches; archives are never
-deleted until the build succeeds.
+completion. Valid archives are reused across relaunches ("hot restart"); archives
+are never deleted until the build succeeds. The manifest is append-only JSONL
+with last-write-wins per dataset code, so it survives crashes and is trivial to
+inspect by hand.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from enum import Enum
 from pathlib import Path
 from typing import Iterable
@@ -25,6 +27,8 @@ MAX_RETRIES = 3
 
 
 class State(str, Enum):
+    """The lifecycle states a dataset moves through during a build."""
+
     PENDING = "pending"
     DOWNLOADING = "downloading"
     DOWNLOADED = "downloaded"
@@ -37,13 +41,29 @@ class State(str, Enum):
 
 @dataclass
 class ManifestEntry:
+    """One dataset's current state in the download manifest.
+
+    Mirrors the record shape suggested in FAOSTATdb.md (dataset_code, url,
+    expected size/rows, archive_path, sha256, status, attempts, last_error,
+    downloaded_at). ``updated_at`` timestamps the last transition.
+    """
+
     dataset_code: str
     state: str = State.PENDING.value
     archive_path: str | None = None
     archive_sha256: str | None = None
     url: str | None = None
+    expected_size: str | None = None
+    expected_rows: int | None = None
+    attempts: int = 0
     error: str | None = None
+    downloaded_at: str | None = None
     updated_at: str | None = None
+
+
+# Field names of ManifestEntry, used to filter unknown keys when loading an older
+# manifest written by a previous version (forward/backward compatibility).
+_ENTRY_FIELDS = {f.name for f in fields(ManifestEntry)}
 
 
 class Manifest:
@@ -56,11 +76,15 @@ class Manifest:
             self._load()
 
     def _load(self) -> None:
+        """Replay the JSONL log; later lines override earlier ones per code."""
         for line in self.path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             data = json.loads(line)
+            # Drop keys this version doesn't know about so a manifest written by a
+            # newer/older build still loads instead of raising TypeError.
+            data = {k: v for k, v in data.items() if k in _ENTRY_FIELDS}
             entry = ManifestEntry(**data)
             self._entries[entry.dataset_code] = entry
 
@@ -77,6 +101,11 @@ class Manifest:
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(asdict(entry)) + "\n")
 
+    def attempts(self, dataset_code: str) -> int:
+        """How many download attempts have been recorded for this dataset."""
+        entry = self.get(dataset_code)
+        return entry.attempts if entry else 0
+
     def needs_download(self, dataset_code: str, archive_path: Path) -> bool:
         """True unless a present, presumed-good archive already exists.
 
@@ -87,6 +116,10 @@ class Manifest:
         crashed before importing it: Phase 2 re-validates every archive with
         ``testzip()`` anyway, so a corrupt reuse is caught and re-handled there
         rather than forcing a blind re-download of everything.
+
+        This is the heart of "keep the .zip in the cache so we don't re-download
+        every run": as long as a valid archive is on disk and recorded, it is
+        reused verbatim.
         """
         entry = self.get(dataset_code)
         if entry is None:
@@ -102,18 +135,33 @@ class Manifest:
         return entry.state not in reusable
 
 
-def download_file(url: str, dest: Path, *, timeout: float = 300.0) -> Path:
+def download_file(
+    url: str, dest: Path, *, timeout: float = 300.0, on_progress=None
+) -> Path:
     """Download ``url`` to ``dest`` via a ``.part`` temp file + atomic rename.
 
     Returns the final ``dest`` path. Raises on network/HTTP error so callers can
-    apply retry/backoff.
+    apply retry/backoff. The atomic rename guarantees a ``*.zip`` on disk is
+    always a *complete* download — a killed process leaves only a ``*.part``.
+
+    ``on_progress(bytes_so_far, total_or_None)`` is called after each chunk so a
+    progress UI can render a bar; ``total`` comes from the ``Content-Length``
+    header when the server sends it (``None`` otherwise).
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "faostatdb"})
     with urllib.request.urlopen(req, timeout=timeout) as resp, part.open("wb") as out:  # noqa: S310
+        total = resp.headers.get("Content-Length")
+        total = int(total) if total and total.isdigit() else None
+        done = 0
+        if on_progress is not None:
+            on_progress(0, total)
         while chunk := resp.read(1 << 20):
             out.write(chunk)
+            done += len(chunk)
+            if on_progress is not None:
+                on_progress(done, total)
     part.replace(dest)
     return dest
 
@@ -124,13 +172,18 @@ def download_with_retry(
     *,
     backoff: Iterable[float] = RETRY_BACKOFF_SECONDS,
     sleep=time.sleep,
+    on_progress=None,
 ) -> Path:
-    """Download with exponential backoff. Re-raises the last error after retries."""
+    """Download with exponential backoff. Re-raises the last error after retries.
+
+    Retries at ``backoff`` delays (default 2s, 5s, 15s) up to ``MAX_RETRIES``
+    times, then gives up and re-raises so the caller can mark the dataset failed.
+    """
     delays = list(backoff)
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            return download_file(url, dest)
+            return download_file(url, dest, on_progress=on_progress)
         except Exception as exc:  # noqa: BLE001 — retried/re-raised below
             last_exc = exc
             if attempt < len(delays):

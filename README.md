@@ -3,11 +3,22 @@
 A local, **source-preserving DuckDB mirror of FAOSTAT bulk data**.
 
 FAOSTATdb downloads FAOSTAT bulk ZIP archives, validates them, and imports each
-dataset into a single DuckDB file — one fact table per dataset (`data_<code>`).
-It is **not** a harmonization layer: flags are retained and values are never
-altered. It removes storage-level duplication and records reproducibility
-metadata (source hashes, timestamps, tool/duckdb/python versions) so a built
-database can be audited and cited.
+dataset into a single DuckDB file — one fact table per dataset (`data_<code>`),
+with repeated labels lifted into shared dimension tables. It is **not** a
+harmonization layer: flags are retained and values are never altered. It removes
+storage-level duplication and records reproducibility metadata (source hashes,
+timestamps, tool/duckdb/python versions) so a built database can be audited and
+cited.
+
+**Design principle (the tie-breaker for every borderline decision):**
+
+> FAOSTATdb preserves the statistical content of FAOSTAT exactly, while removing
+> storage-level duplication and adding reproducibility metadata.
+
+New to command-line tools? Jump to [New to CLI tools?](#new-to-cli-tools-a-2-minute-primer)
+for a gentle primer, then come back here.
+
+---
 
 ## Install
 
@@ -17,411 +28,731 @@ pip install -e ".[ui]"      # ui extra adds rich progress + platformdirs cache d
 python -m faostatdb --help
 ```
 
-Required dependency: `duckdb`. Optional: `rich`, `platformdirs`.
+Required dependency: `duckdb`. Optional: `rich` (nicer progress), `platformdirs`
+(OS-appropriate cache dirs). Everything else is Python standard library
+(`zipfile`, `tomllib`, `urllib`, `zipapp`).
+
+## Quick start
+
+```bash
+faostatdb list                              # what would a build download?
+faostatdb build --include AE --yes          # build one tiny dataset (~77 KB)
+faostatdb build --yes                        # build everything (asks first, unless --yes)
+faostatdb info                               # summarize the built database
+faostatdb sql "SELECT * FROM faostat_dataset LIMIT 5"
+```
+
+By default, downloaded archives are **deleted after a successful build**
+(`keep_archives = false`). Hot restart still saves you: archives are never deleted
+until the build *succeeds*, so an interrupted or partially-failed run reuses what
+it already fetched. If you're iterating (rebuilding repeatedly), set
+`keep_archives = true` to keep the `.zip` cache across successful builds too. See
+[Caching & re-runs](#caching--re-runs).
+
+---
 
 ## Commands
 
-`faostatdb` exposes four commands. Run `faostatdb --help` (or `--version`) for
-the top-level summary, and `faostatdb <command> --help` for any one of them.
+`faostatdb` exposes the commands below. Run `faostatdb --help` (or `--version`)
+for the top-level summary, and `faostatdb <command> --help` for any one of them.
 
 | Command | What it does |
 | --- | --- |
-| `faostatdb list` | Fetches the FAOSTAT bulk inventory (`datasets_E.json`), applies your current dataset selection (`all` / `include` / `exclude`), and prints the selected dataset codes and names plus a count of how many are selected out of all available. Lets you preview exactly what a build would download. |
-| `faostatdb tables` | Opens an already-built database read-only and lists every table in it with its estimated row count (the `data_<code>` fact tables plus the `faostat_dataset` / `faostat_build` metadata tables). Useful to inspect a finished build. |
-| `faostatdb config show` | Prints the **effective** configuration as TOML — the committed `faostatdb.toml` defaults after `secrets.env` environment variables have been merged in. Use it to confirm what a run will actually use. |
-| `faostatdb build` | The main command: selects datasets, downloads and validates their archives, imports each into the DuckDB file, and records reproducibility metadata. See the flags and pipeline below. |
-
-### `faostatdb list`
-
-```bash
-faostatdb list             # list the datasets your current selection would build
-faostatdb list --remote    # force-fetch the live remote inventory
-```
-
-### `faostatdb tables`
-
-```bash
-faostatdb tables                              # inspect the default database
-faostatdb tables --database food.duckdb       # inspect a specific database
-```
-
-If the database file does not exist, it reports the missing path and exits
-non-zero.
-
-### `faostatdb config show`
-
-```bash
-faostatdb config show
-```
+| `faostatdb list` | Fetches the FAOSTAT bulk inventory (`datasets_E.json`), applies your selection (`all` / `include` / `exclude`), and prints the selected dataset codes + names and a count of selected-of-available. Preview exactly what a build would download. |
+| `faostatdb build` | The main command: selects datasets, downloads and validates archives, imports each into the DuckDB file, extracts dimensions + flags, builds labelled views, records provenance, and compacts the result. See the flags below. |
+| `faostatdb tables` | Opens a built database read-only and lists every table with an estimated row count. |
+| `faostatdb info` | Prints a **reproducibility summary** of a built database: size, dataset count, build timestamp, metadata SHA256, and tool/DuckDB/Python versions. |
+| `faostatdb validate` | Opens a built database read-only and checks that every `data_<code>` fact table exists and is queryable (non-empty). Exits non-zero on problems. |
+| `faostatdb config show` | Prints the **effective** configuration as TOML (committed defaults after `secrets.env` env vars are merged). |
+| `faostatdb config init` | Writes a default `faostatdb.toml` into the current directory (`--force` to overwrite). |
+| `faostatdb clean-cache` | Deletes cached archives (`*.zip`/`*.part`) and the download manifest from the download directory, and reports how much was freed. |
+| `faostatdb sql "<query>"` | Runs one SQL query against a built database (read-only) and prints an aligned text table — a convenience wrapper, no pandas required. |
+| `faostatdb self-contained -o faostatdb.pyz` | Bundles the package into a single executable `.pyz` (stdlib `zipapp`) you can drop in `~/.local/bin`. Run it with `python faostatdb.pyz build …`. |
 
 ### `faostatdb build`
 
 ```bash
 faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
-                [--jobs N] [--keep-archives] [--download-dir DIR] [--yes] [--strict]
+                [--jobs N] [--keep-archives | --no-keep-archives] \
+                [--download-dir DIR] [--yes] [--strict] \
+                [--no-compact] [--keep-raw-tables] [--enrich-areas] \
+                [--json] [--ascii] [--no-progress]
 ```
 
 | Flag | Effect |
 | --- | --- |
 | `--database PATH` | Output DuckDB path/filename (overrides `build.database`). A bare filename lands under `$FABIO_DUCKDB_DIR`; see [Where files are stored](#where-files-are-stored). |
-| `--include QCL,FBS` | Build **only** these comma-separated dataset codes (sets selection mode to `include`). |
-| `--exclude FA,CBH` | Build everything **except** these codes (sets selection mode to `exclude`). `--include` takes precedence if both are given. |
-| `--jobs N` | Number of parallel download workers (overrides `build.jobs`, default 6). |
-| `--keep-archives` | Keep the downloaded `*.zip` archives after a successful build instead of deleting them. |
+| `--include QCL,FBS` | Build **only** these codes (selection mode → `include`). |
+| `--exclude FA,CBH` | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given. |
+| `--jobs N` | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`). |
+| `--keep-archives` / `--no-keep-archives` | Force keeping / deleting the cached `*.zip` after a successful build. Default: **keep**. |
 | `--download-dir DIR` | Where raw archives are cached (overrides `build.download_dir`). |
-| `--yes` | Skip the interactive confirmation prompt. **Required** for non-interactive runs (CI, scripts) — without a TTY the build refuses to proceed. |
-| `--strict` | Abort the whole build on the first error (download, invalid ZIP, or import failure). Without it, failed datasets are recorded and skipped while the rest continue. |
+| `--yes` (alias `--all`) | Skip the confirmation prompt. **Required** for non-interactive runs (CI/scripts). |
+| `--strict` | Abort the whole build on the first error. Without it, failed datasets are recorded + skipped and the rest continue. |
+| `--no-compact` | Skip the final compaction pass (faster, but a larger file — see [Making the database small](#making-the-database-as-small-as-possible)). |
+| `--keep-raw-tables` | Also keep an untouched `raw_<code>` copy of each import (debugging losslessness). |
+| `--enrich-areas` | Add the optional, clearly-labelled `area_classification` table (country vs. aggregate). Off by default; not source FAOSTAT content. |
+| `--json` | Emit machine-readable JSON-lines progress on **stdout** (human logs stay on stderr). Great for CI. |
+| `--ascii` | Use ASCII status icons (`[OK]`/`[X]`) instead of Unicode (`✓`/`✗`). |
+| `--no-progress` | Suppress animated progress bars (per-dataset event lines still print). |
 
 ```bash
-faostatdb build --yes                                  # build the full database
-faostatdb build --include QCL,FBS --database food.duckdb   # build a subset
+faostatdb build --yes                                      # full database
+faostatdb build --include QCL,FBS --database food.duckdb   # a subset
+faostatdb build --yes --json > build-events.jsonl          # CI-friendly log
 ```
 
 #### Re-running only the missing / failed datasets
 
 A build is **incremental and non-destructive** as long as `overwrite` stays
-`false` (the default). The build opens the existing `.duckdb` file in place and
-only ever touches the tables for the datasets it imports — each import does
+`false` (the default). The build opens the existing `.duckdb` in place and only
+touches the tables for datasets it imports — each import does
 `DROP TABLE IF EXISTS data_<code>` for *that* code alone, then recreates it. Any
-`data_<code>` table not in the current selection is left exactly as it was.
+`data_<code>` not in the current selection is left exactly as it was.
 
-So if some datasets failed (e.g. an encoding error) while the rest imported
-fine, just re-run with `--include` listing only the codes you need to redo:
+So if some datasets failed (a dropped download, a corrupt archive) while the rest
+imported fine, re-run with `--include` listing only the codes to redo:
 
 ```bash
 faostatdb build --yes --include CBH,SXS,WCAD
 ```
 
-This rebuilds `data_cbh`, `data_sxs`, `data_wcad` and leaves every other table
-— and all its data — intact. Failed datasets keep their downloaded archives on
-disk, so the re-run reuses them via the hot-restart manifest instead of
-downloading again (only missing or invalid archives are re-fetched).
+Failed datasets keep their cached archives, so the re-run reuses them via the
+hot-restart manifest instead of downloading again.
 
-> ⚠️ Do **not** set `overwrite = true` (or `FAOSTATDB_OVERWRITE=true`) for this:
-> that deletes the whole database file before building, losing the datasets you
-> already have. Incremental re-runs rely on `overwrite` being `false`.
+> ⚠️ Do **not** set `overwrite = true` for this — it wipes the whole database
+> file before building, losing the datasets you already have.
 
-## How the pipeline works
+---
 
-Everything starts at the CLI and flows through the modules below. The entry
-point is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as either the
-installed `faostatdb` command or `python -m faostatdb` (via
-[`faostatdb/__main__.py`](faostatdb/__main__.py)).
+## Caching & re-runs
+
+The slow, flaky part of a build is downloading ~70 archives from FAO's server.
+FAOSTATdb is built so you pay that cost **once**:
+
+- Every download is tracked in a **manifest** (`.faostatdb-downloads/manifest.jsonl`)
+  with an explicit state machine: `pending → downloading → downloaded →
+  zip_valid|zip_invalid → importing → imported|failed`.
+- Archives download to `*.part` and are **atomically renamed** to `*.zip` only on
+  completion, so a killed process never leaves a half-file masquerading as valid.
+- Within a run (and across interrupted/failed runs), any archive present on disk
+  **and** recorded as `downloaded`/`imported` is **reused verbatim** — no
+  re-download. (Phase 2 re-validates every archive with `zipfile.testzip()`
+  anyway, so a corrupt reuse is caught and re-fetched.)
+- `keep_archives` defaults to **false**, so archives are deleted once the build
+  *succeeds* — but never before, so a crash/failure still leaves them for the next
+  run. If you're iterating on the import/schema and want fast repeated builds, set
+  `--keep-archives` (or `keep_archives = true`) to persist the cache across
+  successful builds; use `faostatdb clean-cache` to wipe it on demand.
+
+---
+
+## The build pipeline
+
+Everything starts at the CLI and flows through the modules below. The entry point
+is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as the installed
+`faostatdb` command or `python -m faostatdb`
+([`faostatdb/__main__.py`](faostatdb/__main__.py)).
 
 ### What each file does
 
 | File | Role |
 | --- | --- |
-| [`cli.py`](faostatdb/cli.py) | Parses arguments, dispatches to `list` / `config` / `build`, and orchestrates the build (selection → confirm → download → validate → import → metadata). |
+| [`cli.py`](faostatdb/cli.py) | Parses arguments, dispatches every command, and orchestrates the build (select → confirm → download → validate → import → enrich → record → compact). |
 | [`__main__.py`](faostatdb/__main__.py) | Lets you run the tool with `python -m faostatdb`. |
-| [`config.py`](faostatdb/config.py) | Loads the committed `faostatdb.toml` (stdlib `tomllib`), applies overrides from `secrets.env` env vars, and powers `config show`. TOML < `secrets.env` < CLI flags. |
-| [`metadata.py`](faostatdb/metadata.py) | Fetches and parses the bulk inventory `datasets_E.json`, hashes it for reproducibility, and applies `all` / `include` / `exclude` selection. |
-| [`paths.py`](faostatdb/paths.py) | Resolves **where archives are cached** and where the download manifest lives. |
-| [`download.py`](faostatdb/download.py) | Downloads archives with retry/backoff, tracks every dataset in a hot-restart **manifest** state machine, and writes via `*.part` → atomic rename. |
-| [`validate.py`](faostatdb/validate.py) | Verifies ZIP integrity with stdlib `zipfile.testzip()`, computes the archive SHA256, and optionally checks the declared size. |
-| [`importer.py`](faostatdb/importer.py) | Extracts the main CSV, imports it into `data_<code>` via DuckDB's `read_csv` (**never pandas**), and deletes the extracted CSV afterward. |
-| [`schema.py`](faostatdb/schema.py) | Normalizes CSV headers to stable `snake_case` (values/flags untouched) and defines the `faostat_dataset` / `faostat_build` metadata-table DDL. |
-| [`progress.py`](faostatdb/progress.py) | Human-readable progress to stderr — uses `rich` if installed, plain lines otherwise. |
+| [`config.py`](faostatdb/config.py) | Loads `faostatdb.toml` (stdlib `tomllib`), applies `secrets.env` env-var overrides, powers `config show`/`init`. Precedence: TOML < `secrets.env` < CLI flags. |
+| [`metadata.py`](faostatdb/metadata.py) | Fetches + parses `datasets_E.json`, hashes it for reproducibility, keeps every field (incl. the raw entry JSON), and applies `all`/`include`/`exclude` selection. |
+| [`paths.py`](faostatdb/paths.py) | Resolves where archives are cached and where the output database is written. |
+| [`download.py`](faostatdb/download.py) | Parallel download with retry/backoff, the hot-restart **manifest** state machine, and `*.part` → atomic rename. |
+| [`validate.py`](faostatdb/validate.py) | ZIP integrity via `zipfile.testzip()`, archive SHA256, optional declared-size check. |
+| [`importer.py`](faostatdb/importer.py) | Extracts the main CSV, imports it into `data_<code>` via `read_csv` (**never pandas**), extracts dimensions + the flag legend, records column mappings, and builds the labelled view. |
+| [`schema.py`](faostatdb/schema.py) | Column-name normalization, dimension detection, labelled-view generation, and metadata-table DDL. |
+| [`compact.py`](faostatdb/compact.py) | Rewrites the finished database into a fresh file (`COPY FROM DATABASE`) to reclaim space from dropped columns. |
+| [`enrich.py`](faostatdb/enrich.py) | Optional, clearly-separated `area_classification` enrichment. |
+| [`progress.py`](faostatdb/progress.py) | Human/JSON/ASCII/quiet progress reporting — `rich` bars if installed, plain lines otherwise. |
 
 ### Order of calls during `faostatdb build`
 
-1. **Configure** — `cli.main` calls `config.load_config()`: the committed
-   `faostatdb.toml` is loaded, then overridden by environment variables (read
-   from `secrets.env` if present), then by CLI flags (`_apply_build_overrides`).
-2. **Select** — `metadata.fetch_and_parse()` downloads and parses
-   `datasets_E.json`; `metadata.select_datasets()` reduces it to the chosen
-   datasets per the `[datasets]` config.
-3. **Confirm** — unless `--yes`, the CLI prompts before downloading (and refuses
-   to proceed non-interactively without `--yes`).
-4. **Resolve paths** — `paths.resolve_download_dir()` decides where archives are
-   cached; `paths.manifest_path()` locates the manifest inside it.
-5. **Download** — for each selected dataset, `download.Manifest.needs_download()`
-   decides whether a valid archive already exists (hot restart). Missing ones go
-   through `download.download_with_retry()` → `*.part` → atomic rename to `*.zip`.
-   State transitions are appended to the manifest at every step.
-6. **Validate** — `validate.validate_zip()` runs `testzip()` and computes the
-   SHA256; bad archives are marked `zip_invalid` and re-fetched.
-7. **Import** — `importer.import_archive()` extracts the largest top-level CSV to
-   a temp build dir, then `import_csv()` runs
-   `CREATE TABLE data_<code> AS SELECT … FROM read_csv(...)` with headers
-   normalized by `schema.normalize_columns()`. The extracted CSV is deleted.
-8. **Record** — `schema.create_metadata_tables()` plus per-dataset rows in
-   `faostat_dataset` and a build row in `faostat_build` capture the metadata hash,
-   per-archive SHA256, timestamps, and tool/DuckDB/Python versions.
-
-> Status: the full `run_build` driver loop (steps 1–8) is implemented — parallel
-> download with hot restart, sequential validate + import, and metadata recording.
-> See [PLAN.md](PLAN.md) for the remaining v0.1 polish.
+1. **Configure** — `config.load_config()` merges TOML < `secrets.env` < CLI flags.
+2. **Select** — `metadata.fetch_and_parse()` + `metadata.select_datasets()`.
+3. **Confirm** — unless `--yes`, print an estimated-size summary and prompt (refuse
+   non-interactively without `--yes`).
+4. **Resolve paths** — `paths.resolve_download_dir()` + `paths.manifest_path()`.
+5. **Download** (parallel) — `manifest.needs_download()` skips cached archives;
+   the rest go through `download_with_retry()` → `*.part` → atomic rename.
+6. **Validate** — `validate.validate_zip()` runs `testzip()` + SHA256.
+7. **Import** (sequential) — `importer.import_archive()`: `read_csv` →
+   `data_<code>` → dimension extraction → constant-column removal → flag legend →
+   column mapping → labelled view.
+8. **Enrich** (optional) — `enrich.enrich_areas()` if `--enrich-areas`.
+9. **Record** — provenance rows in `faostat_dataset` / `faostat_build`.
+10. **Compact** — `compact.compact_database()` rewrites the file to its smallest form.
 
 ### Where files are stored
 
 | What | Where | Lifetime |
 | --- | --- | --- |
-| **Output database** | `$FABIO_DUCKDB_DIR/<build.database>` (see below) | permanent — this is the product, kept outside the repo |
-| **Downloaded archives** (`*.zip`) | the resolved `download_dir` — project-local `./faostat_temp_download/` by default | temporary; removed after a successful build unless `--keep-archives` |
+| **Output database** | `$FABIO_DUCKDB_DIR/<build.database>` (see below) | permanent — the product, kept outside the repo |
+| **Cached archives** (`*.zip`) | the resolved `download_dir` — project-local `./faostat_temp_download/` by default | deleted after a *successful* build (kept after a failure, or always with `--keep-archives`) |
 | **In-progress downloads** (`*.part`) | inside `download_dir` | transient — renamed to `*.zip` on completion |
-| **Download manifest** (`manifest.jsonl`) | `<download_dir>/.faostatdb-downloads/` | persists between runs to enable hot restart |
+| **Download manifest** (`manifest.jsonl`) | `<download_dir>/.faostatdb-downloads/` | persists between runs (hot restart) |
 | **Extracted CSVs** | a temp build dir under `download_dir` | deleted immediately after each import |
 
-The **output database** location is resolved from `build.database`:
+The **output database** location is resolved from `build.database`: an absolute
+path is used as-is; a bare filename (default `faostat.duckdb`) is placed inside
+`$FABIO_DUCKDB_DIR` (or the OS data dir if unset) — **never** the repository, so a
+built database is never committed by accident.
 
-- An **absolute** path is used as-is.
-- A **bare filename** (the default, `faostat.duckdb`) is placed inside the
-  `FABIO_DUCKDB_DIR` environment variable. If that variable is unset, it falls
-  back to the OS data directory — never the repository — so a built database is
-  never committed by accident.
+#### This repo's setup (`secrets.env`)
 
-The **`download_dir`** (raw, temporary archives) is resolved in this order
-(highest precedence first):
-
-1. `--download-dir DIR` (CLI) or `download_dir` in `faostatdb.toml`
-   — with `~`, `${VAR}`, and `%VAR%` expansion applied. A relative path is taken
-   relative to the project, so the default `faostat_temp_download` lands in
-   `./faostat_temp_download/`.
-2. The `FAOSTATDB_DOWNLOAD_DIR` environment variable.
-3. `./faostat_temp_download/` (project-local).
-
-#### Setting the path via `secrets.env` (this repo's setup)
-
-This repo keeps the machine-specific output path in a git-ignored
-[`secrets.env`](secrets.env) file. The final DuckDB is written under
-`FABIO_DUCKDB_DIR`. To point it at `C:\where\it\is\stored`, `secrets.env`
-contains:
+Machine-specific paths live in a git-ignored [`secrets.env`](secrets.env). To
+write the database under `C:\where\it\is\stored`:
 
 ```dotenv
 FABIO_DUCKDB_DIR=C:\where\it\is\stored
 ```
 
-FAOSTATdb loads `secrets.env` from the current directory automatically at
-startup, so you can just run the build — no manual sourcing required:
+FAOSTATdb loads `secrets.env` automatically at startup, so `faostatdb build --yes`
+just works. Variables already set in your shell win over `secrets.env`.
 
-```bash
-faostatdb build --yes
-```
-
-Variables already set in your shell take precedence over `secrets.env`, so you
-can still override a single run from the command line:
-
-```powershell
-$env:FABIO_DUCKDB_DIR = "C:\elsewhere"; faostatdb build --yes
-```
-
-Keep `secrets.env` out of version control (it is already covered by
-[.gitignore](.gitignore)). See the [Configuration](#configuration) section for
-the full list of overridable variables.
+---
 
 ## How the database is constructed
 
-A built `.duckdb` file is assembled to mirror FAOSTAT's bulk data **without
-altering it**. The construction follows three principles: one fact table per
-dataset, stable column names, and embedded provenance.
+A built `.duckdb` mirrors FAOSTAT's bulk data **without altering it**, following a
+few principles: one fact table per dataset, labels deduplicated into dimensions,
+stable column names, everything stored as text, and embedded provenance.
 
 ### One fact table per dataset
 
-For each selected dataset with code `<code>`, the importer creates a single fact
-table named `data_<code>` (lower-cased — e.g. dataset `QCL` → table `data_qcl`).
-The table is built directly from the dataset's main CSV:
-
-- The largest top-level `.csv` in the archive is treated as the main table
-  (FAOSTAT archives also ship smaller flag/note sidecar CSVs).
-- It is read with DuckDB's `read_csv` (`encoding='latin-1'`, header inferred) —
-  **never pandas**. DuckDB infers each column's type.
-- The table is created with `CREATE TABLE data_<code> AS SELECT … FROM
-  read_csv(...)`, projecting every source column through `"Raw Name" AS
-  snake_name` so **no column is dropped and no value or flag is changed**.
+For each dataset `<code>`, the importer creates `data_<code>` (lower-cased, e.g.
+`QCL` → `data_qcl`) directly from the dataset's main CSV (the largest top-level
+`.csv` in the archive), read with DuckDB's `read_csv` — **never pandas**.
 
 ### Dimension tables (deduplicated labels)
 
-FAOSTAT repeats each dimension's attributes on every fact row — a single area
-carries `area_code` + `area_code_m49` + `area_label` across millions of rows.
-After the fact table is built, the importer moves these redundant attributes into
-shared `dim_<stem>` tables and keeps only the `<stem>_code` key in the fact table:
+FAOSTAT repeats each dimension's attributes on every row — a single area carries
+`area_code` + `area_code_m49` + `area_label` across millions of rows. After the
+fact table is built, those redundant attributes move into shared `dim_<stem>`
+tables and only the `<stem>_code` key stays in the fact table:
 
 - Any `<stem>_code` column with sibling attribute columns (the bare `<stem>` or
   anything starting with `<stem>_`) becomes a dimension: `area`, `item`,
-  `element`, `year`, etc.
-- Each `dim_<stem>` table is keyed by `(dataset_code, <stem>_code)` — codes are
-  **not** globally unique across FAOSTAT domains, so the dataset code namespaces
-  them. Re-importing a dataset replaces only its own rows.
-- This removes storage-level duplication **without altering any value**: the
-  dimension table holds the exact source attributes, just deduplicated.
+  `element`, `year`, …
+- Each `dim_<stem>` is keyed by `(dataset_code, <stem>_code)` — codes are **not**
+  globally unique across FAOSTAT domains, so the dataset code namespaces them.
+- This is lossless: the dimension table holds the exact source attributes,
+  deduplicated. Re-importing a dataset replaces only its own rows.
 
-So `data_qcl` keeps `area_code, item_code, element_code, year_code, unit, value,
-flag_code, note`, while `dim_area`, `dim_item`, `dim_year`, and `dim_element`
-hold the labels and alternate codes. See [Querying the result](#querying-the-result)
-for how to join them back.
+### Flag legend (`dim_flag`)
+
+FAOSTAT archives ship a small flag/symbol legend CSV. FAOSTATdb loads it into
+`dim_flag(dataset_code, flag_code, flag_description)` so flag codes can be
+labelled. The fact table keeps `flag_code` verbatim; flags are **never** collapsed
+to a boolean.
+
+### Constant-column removal
+
+Columns that never vary across a whole dataset (e.g. `Domain Code`, or a
+single-element dataset's `element_code`) carry no per-row information. They are
+dropped from the fact table and their single value recorded in
+`faostat_constant_column` — lossless and reconstructable, and it shrinks the file.
 
 ### Column-name normalization
 
-Only column **names** are normalized — to stable `snake_case` so queries are
-portable across datasets. Values and flags are preserved verbatim. The rules
-(in [`schema.py`](faostatdb/schema.py)):
+Only column **names** are normalized (to stable `snake_case`); values/flags are
+verbatim. Every rename is recorded in `faostat_column_mapping`
+(`original_column_name` → `normalized_column_name` + an `inferred_role`). Rules:
 
-- Parenthesised qualifiers are brought inline: `"Area Code (M49)"` →
-  `area_code_m49`.
-- Everything is lower-cased and non-alphanumeric runs collapse to `_`:
-  `"Months Code"` → `months_code`.
-- A small override map pins common names for stability: `Item` → `item_label`,
-  `Element` → `element_label`, `Area` → `area_label`, `Flag` → `flag_code`,
-  while `Value`, `Year`, and `Unit` keep their names.
-- If two headers normalize to the same name, later ones get a numeric suffix
-  (`name`, `name_1`, `name_2`) so nothing collides.
+- Parenthesised qualifiers inline: `"Area Code (M49)"` → `area_code_m49`.
+- Lower-cased, non-alphanumeric runs → `_`: `"Months Code"` → `months_code`.
+- A small override map pins common names: `Item` → `item_label`, `Element` →
+  `element_label`, `Area` → `area_label`, `Flag` → `flag_code`; `Value`, `Year`,
+  `Unit` keep their names. (FAOSTAT has no unit *code*, so unit stays inline.)
+- Collisions get a numeric suffix (`name`, `name_1`, …).
+
+### Types and encoding
+
+- **Every column is stored as `VARCHAR` (text).** FAOSTAT "code" columns are
+  identifiers, not integers — they carry leading zeros, letters, and dots (e.g.
+  `210091F`, `1685.01.01`, `210400TSUB`). Type inference would guess `INT64` and
+  then abort the *entire* dataset on the first row that doesn't fit. Reading
+  everything as text (`all_varchar=true`) removes that failure mode and preserves
+  each cell byte-for-byte. Cast explicitly when you query numbers.
+- **Encoding is detected per archive.** Most files are UTF-8; some carry a UTF-16
+  BOM, others are Latin-1 (e.g. an unescaped `ô` in "Côte d'Ivoire"). FAOSTATdb
+  checks for a BOM, validates as UTF-8, and falls back to Latin-1 only when needed.
+
+### Labelled convenience views
+
+For each dataset the build also creates `view_<code>_labelled` — the compact fact
+table with the dimension labels (and flag descriptions) already joined back on.
+This is what makes no-SQL, dataframe-style querying painless (see
+[Querying](#querying-the-database)). Views cost nothing on disk, so they are built
+by default.
+
+### Making the database as small as possible
+
+Three lossless reductions shrink the file — dimension extraction, constant-column
+removal, and then a **compaction pass**. That last step matters: DuckDB's
+`DROP COLUMN` is a catalog change that leaves the old column's bytes in place, and
+a plain `CHECKPOINT` does **not** reclaim them. So at the end of a build FAOSTATdb
+rewrites the whole database into a fresh file with `COPY FROM DATABASE`, which
+materializes only the columns that still exist. (On a rebuild into an existing
+file this routinely halves the size — measured 8.3 MB → 4.3 MB on a re-run of a
+single small dataset.) Disable with `--no-compact` if you prefer speed.
 
 ### Embedded provenance tables
 
-Alongside the `data_<code>` tables, every build writes two metadata tables so a
-database can be audited and cited (created by `schema.create_metadata_tables`):
-
 | Table | One row per | Key columns |
 | --- | --- | --- |
-| `faostat_dataset` | imported dataset | `dataset_code`, `dataset_name`, `date_update`, `file_location`, `file_size_raw`, `file_rows_declared`, `source_metadata_url`, `source_metadata_hash`, `archive_sha256`, `import_status` |
-| `faostat_build` | build run | `build_id`, `started_at`, `completed_at`, `faostatdb_version`, `duckdb_version`, `python_version`, `os`, `metadata_snapshot_sha256`, `command_line`, `config_sha256` |
+| `faostat_dataset` | imported dataset | `dataset_code`, `dataset_name`, `topic`, `dataset_description`, `contact`, `email`, `date_update`, `compression_format`, `file_type`, `file_location`, `file_size_raw`, `file_rows_declared`, `rows_imported`, `downloaded_at`, `source_metadata_url`, `source_metadata_hash`, `source_metadata_json`, `archive_sha256`, `import_status` |
+| `faostat_build` | build run | `build_id`, `started_at`, `completed_at`, `faostatdb_version`, `duckdb_version`, `python_version`, `os`, `metadata_snapshot_sha256`, `command_line`, `config_sha256`, `datasets_imported`, `datasets_failed` |
+| `faostat_column_mapping` | renamed column | `dataset_code`, `table_name`, `original_column_name`, `normalized_column_name`, `inferred_role` |
+| `faostat_constant_column` | dropped constant column | `dataset_code`, `table_name`, `column_name`, `value` |
 
-Together these record the metadata-JSON snapshot hash, the per-archive SHA256,
-timestamps, the exact tool / DuckDB / Python versions, the command line, and a
-hash of the effective config — enough to reproduce and verify the build. The
-`import_status` column also flags any dataset that failed (`failed`,
-`zip_invalid`) rather than silently omitting it.
+`import_status` flags any dataset that failed (`failed`, `zip_invalid`) rather than
+silently omitting it. Failures are non-fatal by default; pass `--strict` to abort
+on the first error.
 
-> Failures are non-fatal by default: a dataset that fails to download, fails ZIP
-> validation, or fails to import is recorded in `faostat_dataset` with its status
-> and skipped, and the rest of the build continues. Pass `--strict` to abort on
-> the first error instead. Failed datasets keep their archives on disk so a
-> re-run can resume them (hot restart).
+---
 
-## Querying the result
+## Database schema at a glance
 
-The output is a plain DuckDB file — query it from any language.
+The diagram below shows how the tables relate. `data_<code>` is one fact table per
+dataset (`data_qcl`, `data_fbs`, …); each `dim_<stem>` is shared across datasets
+and keyed by `(dataset_code, <stem>_code)`; `view_<code>_labelled` is the join of
+a fact table to its dimensions. A rendered/standalone version lives in
+[`docs/schema.qmd`](docs/schema.qmd) (Quarto).
+
+```mermaid
+erDiagram
+    faostat_dataset ||--o{ data_CODE : "one fact table per dataset"
+    faostat_dataset ||--o{ faostat_column_mapping : "records renames"
+    faostat_dataset ||--o{ faostat_constant_column : "records dropped constants"
+    faostat_build ||--o{ faostat_dataset : "a build imports datasets"
+
+    data_CODE }o--|| dim_area : "dataset_code, area_code"
+    data_CODE }o--|| dim_item : "dataset_code, item_code"
+    data_CODE }o--|| dim_element : "dataset_code, element_code"
+    data_CODE }o--|| dim_year : "dataset_code, year_code"
+    data_CODE }o--|| dim_flag : "dataset_code, flag_code"
+    data_CODE ||--|| view_CODE_labelled : "labels joined back"
+    dim_area ||--o| area_classification : "optional enrichment (area_code)"
+
+    faostat_dataset {
+        VARCHAR dataset_code PK
+        VARCHAR dataset_name
+        VARCHAR date_update
+        BIGINT  file_rows_declared
+        BIGINT  rows_imported
+        VARCHAR archive_sha256
+        VARCHAR import_status
+    }
+    faostat_build {
+        VARCHAR build_id PK
+        TIMESTAMP completed_at
+        VARCHAR metadata_snapshot_sha256
+        VARCHAR duckdb_version
+    }
+    data_CODE {
+        VARCHAR area_code FK
+        VARCHAR item_code FK
+        VARCHAR element_code FK
+        VARCHAR year_code FK
+        VARCHAR unit
+        VARCHAR value
+        VARCHAR flag_code FK
+    }
+    dim_area {
+        VARCHAR dataset_code PK
+        VARCHAR area_code PK
+        VARCHAR area_code_m49
+        VARCHAR area_label
+    }
+    dim_item {
+        VARCHAR dataset_code PK
+        VARCHAR item_code PK
+        VARCHAR item_label
+    }
+    dim_element {
+        VARCHAR dataset_code PK
+        VARCHAR element_code PK
+        VARCHAR element_label
+    }
+    dim_year {
+        VARCHAR dataset_code PK
+        VARCHAR year_code PK
+        VARCHAR year
+    }
+    dim_flag {
+        VARCHAR dataset_code PK
+        VARCHAR flag_code PK
+        VARCHAR flag_description
+    }
+    view_CODE_labelled {
+        VARCHAR dataset_code
+        VARCHAR area_code
+        VARCHAR area_label
+        VARCHAR item_code
+        VARCHAR item_label
+        VARCHAR value
+        VARCHAR flag_code
+        VARCHAR flag_description
+    }
+    area_classification {
+        VARCHAR area_code PK
+        BOOLEAN is_country
+        BOOLEAN is_aggregate
+        VARCHAR confidence
+    }
+```
+
+**How to read it / how the tables interact:**
+
+- **`faostat_dataset` → `data_<code>`** — one metadata row per dataset, one fact
+  table per dataset. There is no foreign-key constraint (table names are dynamic),
+  but the `dataset_code` links them: `data_qcl` ↔ the `faostat_dataset` row with
+  `dataset_code = 'QCL'`.
+- **`data_<code>` → `dim_*`** — the fact table keeps only codes
+  (`area_code`, `item_code`, …). To get labels, join each `dim_<stem>` on **both**
+  `dataset_code` and the `<stem>_code` (codes aren't globally unique). The dataset
+  code for `data_qcl` is `'QCL'`.
+- **`view_<code>_labelled`** — pre-computes those joins for you. Query this and you
+  never write a join by hand.
+- **`dim_flag`** — labels flag codes; joined into the labelled view too.
+- **`faostat_column_mapping` / `faostat_constant_column`** — audit trails: what was
+  renamed, and which constant columns were lifted out (with their value).
+- **`area_classification`** — *optional* (`--enrich-areas`), and explicitly **not**
+  source FAOSTAT content (it carries a `confidence` and a `classification_source`).
+
+---
+
+## Querying the database
+
+The output is a plain DuckDB file — query it from any language. Most FAOSTAT users
+don't want to write SQL, so the primary examples below use **dataframe-style
+APIs** on the `view_<code>_labelled` views, with SQL shown afterwards as the
+advanced/diagnostic path.
 
 > ⚠️ **Use the full path to the built database.** A bare `"faostat.duckdb"`
-> resolves relative to your current directory and will usually open the *wrong*
-> (or an empty, freshly-created) file. The build prints the exact path it wrote
-> on its final `done: … -> <path>` line, and that path is `$FABIO_DUCKDB_DIR/<build.database>`
-> (see [Where files are stored](#where-files-are-stored)). In the examples below,
-> replace the path with the one your build reported, e.g.
-> `C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb`.
+> resolves relative to your current directory and usually opens the *wrong* (or an
+> empty) file. The build prints the exact path on its final `done: … -> <path>`
+> line; `faostatdb info` prints it too. Replace the paths below with yours.
 
-Fact tables keep only the dimension **codes** (`area_code`, `item_code`,
-`element_code`, `year_code`, …); the labels and alternate codes live once in
-`dim_<stem>` tables (`dim_area`, `dim_item`, `dim_year`, `dim_element`), keyed by
-`(dataset_code, <stem>_code)`. Join back to a `dim_` table to filter or display
-by label.
+> ⚠️ **Every column is stored as text.** Cast when you need numbers — prefer
+> `TRY_CAST(value AS DOUBLE)` (yields `NULL` for non-numeric cells) over `CAST`.
 
-**DuckDB CLI**
+We use the same five-step task in each language:
+**(1)** find an item code from a label, **(2)** get a time series for one country,
+**(3)** compare several countries, **(4)** rely on joined labels + flags, **(5)** plot.
+
+### Without SQL
+
+#### R — `duckplyr` / `dplyr`
+
+[`duckplyr`](https://duckplyr.tidyverse.org/) runs ordinary `dplyr` code on DuckDB.
+
+```r
+library(duckplyr)
+library(dplyr)
+
+con <- DBI::dbConnect(duckdb::duckdb(),
+                      "C:/path/to/faostat.duckdb", read_only = TRUE)
+
+# The labelled view already has area/item/element labels + flag descriptions.
+qcl <- tbl(con, "view_qcl_labelled")
+
+# (1) Discover item codes from a label — most users search labels first.
+qcl |>
+  filter(grepl("Wheat", item_label, ignore.case = TRUE)) |>
+  distinct(item_code, item_label) |>
+  collect()
+
+# (2)+(4) Wheat production time series for France (labels + flags already joined).
+wheat_fr <- qcl |>
+  filter(area_label == "France",
+         item_label == "Wheat",
+         element_label == "Production") |>
+  mutate(value = as.numeric(value)) |>
+  select(year, value, unit, flag_code, flag_description) |>
+  arrange(year) |>
+  collect()
+
+# (3) Compare several countries.
+wheat_multi <- qcl |>
+  filter(area_label %in% c("France", "Germany", "Italy"),
+         item_label == "Wheat",
+         element_label == "Production") |>
+  mutate(value = as.numeric(value)) |>
+  select(area_label, year, value) |>
+  collect()
+
+# (5) Plot.
+library(ggplot2)
+ggplot(wheat_fr, aes(as.integer(year), value)) +
+  geom_line() +
+  labs(title = "Wheat production in France", x = NULL, y = unique(wheat_fr$unit))
+```
+
+#### Python — Ibis
+
+[Ibis](https://ibis-project.org/) gives a dataframe expression API over DuckDB.
+
+```python
+import ibis
+
+con = ibis.duckdb.connect("C:/path/to/faostat.duckdb", read_only=True)
+qcl = con.table("view_qcl_labelled")
+
+# (1) Discover item codes from a label.
+wheat_codes = (
+    qcl.filter(qcl.item_label.re_search("(?i)wheat"))
+       .select("item_code", "item_label")
+       .distinct()
+       .execute()
+)
+
+# (2)+(4) France wheat production time series, labels + flags already present.
+wheat_fr = (
+    qcl.filter(
+        (qcl.area_label == "France")
+        & (qcl.item_label == "Wheat")
+        & (qcl.element_label == "Production")
+    )
+    .mutate(value=qcl.value.cast("float64"))
+    .select("year", "value", "unit", "flag_code", "flag_description")
+    .order_by("year")
+    .execute()
+)
+
+# (3) Compare several countries.
+wheat_multi = (
+    qcl.filter(
+        qcl.area_label.isin(["France", "Germany", "Italy"])
+        & (qcl.item_label == "Wheat")
+        & (qcl.element_label == "Production")
+    )
+    .mutate(value=qcl.value.cast("float64"))
+    .select("area_label", "year", "value")
+    .execute()
+)
+
+# (5) Plot.
+wheat_fr.assign(year=wheat_fr.year.astype(int)).plot(x="year", y="value")
+```
+
+#### Julia — DataFrames
+
+Julia has no mature `dplyr` translation layer, so the pragmatic path is to pull a
+slice into a `DataFrame` and use `DataFramesMeta`. The labelled view keeps the
+initial SQL minimal.
+
+```julia
+using DuckDB, DBInterface, DataFrames, DataFramesMeta
+
+con = DBInterface.connect(DuckDB.DB, "C:/path/to/faostat.duckdb")
+
+# (2)+(4) France wheat production — labels + flags already in the view.
+wheat_fr = DataFrame(DBInterface.execute(con, """
+    SELECT year, TRY_CAST(value AS DOUBLE) AS value, unit, flag_code, flag_description
+    FROM view_qcl_labelled
+    WHERE area_label = 'France' AND item_label = 'Wheat'
+      AND element_label = 'Production'
+    ORDER BY year
+"""))
+
+# (3) Compare several countries, then reshape with DataFrames verbs.
+multi = DataFrame(DBInterface.execute(con, """
+    SELECT area_label, year, TRY_CAST(value AS DOUBLE) AS value
+    FROM view_qcl_labelled
+    WHERE item_label = 'Wheat' AND element_label = 'Production'
+      AND area_label IN ('France','Germany','Italy')
+"""))
+wide = @chain multi begin
+    unstack(:year, :area_label, :value)
+end
+
+# (5) Plot.
+using Plots
+@df wheat_fr plot(:year, :value, title = "Wheat production in France", legend = false)
+```
+
+### With SQL
+
+#### DuckDB CLI
 
 ```sql
--- find the item code(s) whose label is Wheat, then query the fact table
-SELECT d.area_code, d.year_code, d.value, d.flag_code
+.open 'C:/path/to/faostat.duckdb'
+
+-- Using the labelled view: no joins needed.
+SELECT area_label, year, TRY_CAST(value AS DOUBLE) AS value, flag_code, flag_description
+FROM view_qcl_labelled
+WHERE area_label = 'France' AND item_label = 'Wheat' AND element_label = 'Production'
+ORDER BY year;
+```
+
+#### Advanced SQL — joining dimensions yourself
+
+The labelled view is just this join, spelled out. Note dimensions are keyed by
+**both** `dataset_code` and the code:
+
+```sql
+SELECT a.area_label, i.item_label, d.year_code AS year,
+       TRY_CAST(d.value AS DOUBLE) AS value, d.flag_code, f.flag_description
 FROM data_qcl AS d
-JOIN dim_item AS i
-  ON i.dataset_code = 'QCL' AND i.item_code = d.item_code
-WHERE i.item_label = 'Wheat'
+JOIN dim_area AS a ON a.dataset_code = 'QCL' AND a.area_code = d.area_code
+JOIN dim_item AS i ON i.dataset_code = 'QCL' AND i.item_code = d.item_code
+LEFT JOIN dim_flag AS f ON f.dataset_code = 'QCL' AND f.flag_code = d.flag_code
+WHERE a.area_label = 'France' AND i.item_label = 'Wheat'
 ORDER BY d.year_code;
 ```
 
-**Python**
+### Bare connection snippets
 
 ```python
 import duckdb
-import pandas
-import numpy
-# Use the path your build printed on the final "done: ... -> <path>" line:
-con = duckdb.connect(r"C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb")
-df = con.execute("SELECT * FROM data_qcl LIMIT 10").df()
-labels = con.execute("SELECT * FROM dim_item WHERE dataset_code = 'QCL' LIMIT 10").df()
+con = duckdb.connect(r"C:\path\to\faostat.duckdb", read_only=True)
+con.execute("SELECT * FROM data_qcl LIMIT 10").fetchall()
 ```
-
-**R**
-
 ```r
-library(duckdb)
-con <- dbConnect(duckdb(), r"(C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb)")
+library(duckdb); con <- dbConnect(duckdb(), r"(C:\path\to\faostat.duckdb)")
 dbGetQuery(con, "SELECT * FROM data_qcl LIMIT 10")
 ```
-
-**Julia**
-
 ```julia
 using DuckDB, DataFrames
-con = DBInterface.connect(DuckDB.DB, raw"C:\Users\clara\Documents\PSAE\faostat-cache\faostat.duckdb")
+con = DBInterface.connect(DuckDB.DB, raw"C:\path\to\faostat.duckdb")
 DataFrame(DBInterface.execute(con, "SELECT * FROM data_qcl LIMIT 10"))
 ```
 
+---
+
 ## Configuration
 
-Configuration comes from two files, by design:
+Configuration comes from two files by design:
 
-- [`faostatdb.toml`](faostatdb.toml) — **committed** to the repo. It holds the
-  general, default configuration in its most generic shape: it is exactly what
-  you get when you clone the project. **You are not meant to edit it** for
-  machine-specific or personal settings — leave it alone so it stays clean and
-  pull-able.
-- [`secrets.env`](secrets.env) — **git-ignored**, your own. A simple
-  `KEY=value`-per-line file where you override whatever you need. FAOSTATdb loads
-  it automatically (from the current directory) at startup; values already set in
-  your shell environment are left untouched.
+- [`faostatdb.toml`](faostatdb.toml) — **committed**. The general default shape
+  everyone gets on clone. **Don't edit it** for personal/machine settings.
+- [`secrets.env`](secrets.env) — **git-ignored**, yours. A `KEY=value`-per-line
+  file overriding whatever you need. Loaded automatically at startup; values
+  already set in your shell win over it.
 
-Resolution order, lowest precedence first:
+Resolution order, lowest precedence first: `faostatdb.toml` → `secrets.env` env
+vars → CLI flags. So to change a value, add a line to `secrets.env` (or run
+`faostatdb config init` to scaffold your own TOML).
 
-1. `faostatdb.toml` (the committed defaults).
-2. Environment variables, loaded from `secrets.env` if present.
-3. CLI flags (e.g. `--jobs`, `--include`).
-
-So to change a value you do **not** edit `faostatdb.toml`; you add a line to
-`secrets.env`.
-
-### The committed defaults (`faostatdb.toml`)
+### The committed defaults
 
 ```toml
 [build]
-database = "faostat.duckdb"             # filename; final DB is written under $FABIO_DUCKDB_DIR
-download_dir = "faostat_temp_download"  # temporary raw ZIPs, project-local, deleted after build
-keep_archives = false
-jobs = 6
-overwrite = false
+database = "faostat.duckdb"             # filename; final DB under $FABIO_DUCKDB_DIR
+download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
+keep_archives = false                   # delete cached .zip after a successful build (hot restart still reuses them after a failure)
+jobs = 0                                # parallel downloads; 0 = auto min(8, 2*cpu)
+overwrite = false                       # true wipes the DB before building
+compact = true                          # rewrite the finished DB to reclaim space
+keep_raw_tables = false                 # keep untouched raw_<code> copies (debug)
 
 [datasets]
 mode = "all"            # all | include | exclude
 include = []
 exclude = ["FA", "CBH"]
+
+[performance]
+import_threads = 0      # DuckDB import threads; 0 = DuckDB default
+memory_limit = ""       # e.g. "8GB"; "" = DuckDB default
+
+[enrichment]
+area_classification = false   # optional, non-source area country/region flags
 ```
 
 ### Overriding via `secrets.env`
 
-Each value above maps to an environment variable. Set only the ones you want to
-change; everything else keeps its `faostatdb.toml` value.
+Each value maps to an environment variable; set only the ones you want to change.
 
 ```dotenv
-# Output location (kept out of the repo) — see "Where files are stored" below.
-FABIO_DUCKDB_DIR=C:\where\it\is\stored
+FABIO_DUCKDB_DIR=C:\where\it\is\stored     # output location (kept out of the repo)
 
-# Any of these override the matching faostatdb.toml value:
 FAOSTATDB_DATABASE=faostat.duckdb
 FAOSTATDB_DOWNLOAD_DIR=faostat_temp_download
 FAOSTATDB_KEEP_ARCHIVES=false
-FAOSTATDB_JOBS=6
+FAOSTATDB_JOBS=0
 FAOSTATDB_OVERWRITE=false
+FAOSTATDB_COMPACT=true
+FAOSTATDB_KEEP_RAW_TABLES=false
 FAOSTATDB_DATASETS_MODE=include            # all | include | exclude
-FAOSTATDB_DATASETS_INCLUDE=QCL,FBS         # comma-separated codes
-FAOSTATDB_DATASETS_EXCLUDE=FA,CBH          # comma-separated codes
+FAOSTATDB_DATASETS_INCLUDE=QCL,FBS         # comma-separated
+FAOSTATDB_DATASETS_EXCLUDE=FA,CBH          # comma-separated
+FAOSTATDB_IMPORT_THREADS=0
+FAOSTATDB_MEMORY_LIMIT=8GB
+FAOSTATDB_ENRICH_AREAS=false
 ```
 
-Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; list variables are
-comma-separated. Run `faostatdb config show` to print the effective configuration
-after the TOML and `secrets.env` have been merged.
+Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; lists are comma-separated. Run
+`faostatdb config show` to print the effective configuration after merging.
+
+---
 
 ## Reproducibility
 
-Each build records, in the `faostat_dataset` and `faostat_build` tables: the
-metadata-JSON snapshot hash, per-archive SHA256, download timestamps, and the
-tool / DuckDB / Python versions and command line used.
+Each build records — in `faostat_dataset` and `faostat_build` — the metadata-JSON
+snapshot hash (and the full raw metadata per dataset), per-archive SHA256, download
+timestamps, declared vs. imported row counts, the command line, a hash of the
+effective config, and the tool / DuckDB / Python versions and OS. `faostatdb info`
+prints the headline of all this, so you can answer *"exactly which FAOSTAT snapshot
+is this database based on?"* — valuable for citing or auditing.
+
+---
+
+## New to CLI tools? (a 2-minute primer)
+
+If you mostly use point-and-click apps, here's how a **command-line interface (CLI)**
+program like FAOSTATdb works in general — the ideas transfer to almost any CLI tool.
+
+- **You type commands into a terminal** (PowerShell, Terminal, bash) instead of
+  clicking. A command is the program name, then a *subcommand*, then *options*:
+
+  ```text
+  faostatdb   build   --include QCL   --yes
+  ^program    ^what    ^option+value   ^flag
+  ```
+
+- **Subcommands** (`build`, `list`, `info`, …) are like menu items — each does one
+  job. `faostatdb --help` lists them; `faostatdb build --help` explains one.
+- **Options / flags** tune behavior. `--include QCL` takes a value; `--yes` is a
+  *flag* (on/off, no value). Order among options doesn't matter.
+- **Exit codes**: a command returns `0` on success and non-zero on failure — that's
+  how scripts and CI know whether it worked. (You usually don't see this number;
+  tools react to it for you.)
+- **stdout vs stderr**: normal output goes to *stdout* (you can redirect it to a
+  file with `> out.txt`); progress/warnings go to *stderr* so they don't pollute
+  piped data. That's why `faostatdb build --json > events.jsonl` gives you clean
+  JSON while progress still shows on screen.
+- **Config layering**: many tools read a config file, then let environment
+  variables and command-line flags override it. FAOSTATdb does exactly that
+  (`faostatdb.toml` → `secrets.env` → flags), so you can set a default once and
+  override it for a single run.
+- **Running it three ways**: installed (`faostatdb …`), as a module
+  (`python -m faostatdb …`), or as a single bundled file
+  (`python faostatdb.pyz …`, produced by `faostatdb self-contained`). All run the
+  same code.
+
+A good rule: when unsure, append `--help`. It never changes anything and always
+tells you the available subcommands and options.
+
+---
 
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"      # or ".[dev,ui]" for the rich progress UI
 pytest
 ```
+
+CI (`.github/workflows/ci.yml`) runs the deterministic unit tests on a
+Linux/macOS/Windows × Python 3.11/3.12/3.13 matrix and **never** triggers a full
+FAOSTAT download. A separate, opt-in integration job (weekly / manual) builds the
+single smallest real dataset end to end.
 
 See [PLAN.md](PLAN.md) for the v0.1 build plan and [FAOSTATdb.md](FAOSTATdb.md)
 for the design rationale.

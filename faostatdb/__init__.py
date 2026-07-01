@@ -8,6 +8,6 @@ unaltered) while recording reproducibility metadata.
 See ``FAOSTATdb.md`` for the design rationale and ``PLAN.md`` for the build plan.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["__version__"]

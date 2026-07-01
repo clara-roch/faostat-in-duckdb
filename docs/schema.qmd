@@ -1,0 +1,154 @@
+---
+title: "FAOSTATdb — Database Schema"
+subtitle: "How the tables in a built `faostat.duckdb` relate to one another"
+format:
+  html:
+    toc: true
+    code-fold: false
+    theme: cosmo
+---
+
+## Overview
+
+A FAOSTATdb database is organized around three kinds of objects:
+
+1. **Fact tables** — one per FAOSTAT dataset: `data_qcl`, `data_fbs`, `data_ae`, …
+   (`data_<code>`, lower-cased). They hold the measurements, keeping only
+   dimension **codes** (`area_code`, `item_code`, …) plus `value` and `flag_code`.
+2. **Dimension tables** — shared across datasets: `dim_area`, `dim_item`,
+   `dim_element`, `dim_year`, `dim_flag`, … Each is keyed by
+   `(dataset_code, <stem>_code)` because FAOSTAT codes are **not** globally unique
+   across domains. They hold the deduplicated labels / alternate codes.
+3. **Labelled views** — one per dataset: `view_<code>_labelled`. Each is the fact
+   table with its dimension labels (and flag descriptions) already joined back on,
+   so you can query without writing joins.
+
+Around those sit the **provenance tables** (`faostat_dataset`, `faostat_build`,
+`faostat_column_mapping`, `faostat_constant_column`) and an optional, clearly
+non-source **enrichment** table (`area_classification`).
+
+## Entity–relationship diagram
+
+```{mermaid}
+erDiagram
+    faostat_dataset ||--o{ data_CODE : "one fact table per dataset"
+    faostat_dataset ||--o{ faostat_column_mapping : "records renames"
+    faostat_dataset ||--o{ faostat_constant_column : "records dropped constants"
+    faostat_build ||--o{ faostat_dataset : "a build imports datasets"
+
+    data_CODE }o--|| dim_area : "dataset_code, area_code"
+    data_CODE }o--|| dim_item : "dataset_code, item_code"
+    data_CODE }o--|| dim_element : "dataset_code, element_code"
+    data_CODE }o--|| dim_year : "dataset_code, year_code"
+    data_CODE }o--|| dim_flag : "dataset_code, flag_code"
+    data_CODE ||--|| view_CODE_labelled : "labels joined back"
+    dim_area ||--o| area_classification : "optional enrichment (area_code)"
+
+    faostat_dataset {
+        VARCHAR dataset_code PK
+        VARCHAR dataset_name
+        VARCHAR date_update
+        BIGINT  file_rows_declared
+        BIGINT  rows_imported
+        VARCHAR archive_sha256
+        VARCHAR import_status
+    }
+    faostat_build {
+        VARCHAR build_id PK
+        TIMESTAMP completed_at
+        VARCHAR metadata_snapshot_sha256
+        VARCHAR duckdb_version
+    }
+    data_CODE {
+        VARCHAR area_code FK
+        VARCHAR item_code FK
+        VARCHAR element_code FK
+        VARCHAR year_code FK
+        VARCHAR unit
+        VARCHAR value
+        VARCHAR flag_code FK
+    }
+    dim_area {
+        VARCHAR dataset_code PK
+        VARCHAR area_code PK
+        VARCHAR area_code_m49
+        VARCHAR area_label
+    }
+    dim_item {
+        VARCHAR dataset_code PK
+        VARCHAR item_code PK
+        VARCHAR item_label
+    }
+    dim_element {
+        VARCHAR dataset_code PK
+        VARCHAR element_code PK
+        VARCHAR element_label
+    }
+    dim_year {
+        VARCHAR dataset_code PK
+        VARCHAR year_code PK
+        VARCHAR year
+    }
+    dim_flag {
+        VARCHAR dataset_code PK
+        VARCHAR flag_code PK
+        VARCHAR flag_description
+    }
+    view_CODE_labelled {
+        VARCHAR dataset_code
+        VARCHAR area_code
+        VARCHAR area_label
+        VARCHAR item_code
+        VARCHAR item_label
+        VARCHAR value
+        VARCHAR flag_code
+        VARCHAR flag_description
+    }
+    area_classification {
+        VARCHAR area_code PK
+        BOOLEAN is_country
+        BOOLEAN is_aggregate
+        VARCHAR confidence
+    }
+```
+
+## Reading the relationships
+
+- **`faostat_dataset` ⟶ `data_<code>`.** One metadata row per dataset; one fact
+  table per dataset. Table names are dynamic, so there is no SQL foreign-key
+  constraint — the link is the `dataset_code` (`data_qcl` ↔ the row where
+  `dataset_code = 'QCL'`).
+- **`data_<code>` ⟶ `dim_*`.** Fact tables store only codes. To get labels, join a
+  dimension on **both** `dataset_code` **and** the `<stem>_code`. For example, for
+  `data_qcl` the dataset code is `'QCL'`:
+
+  ```sql
+  SELECT a.area_label, TRY_CAST(d.value AS DOUBLE) AS value
+  FROM data_qcl d
+  JOIN dim_area a ON a.dataset_code = 'QCL' AND a.area_code = d.area_code;
+  ```
+
+- **`view_<code>_labelled`.** Precomputes exactly those joins. Prefer it for
+  interactive/dataframe use — no joins to write.
+- **`dim_flag`.** Labels flag codes with their descriptions (loaded from the
+  archive's flag legend). Also joined into the labelled view.
+- **`faostat_column_mapping` / `faostat_constant_column`.** Audit trails — the
+  raw→normalized column renames, and any column that was constant across a whole
+  dataset (dropped from the fact table, its single value recorded here). Both are
+  keyed by `dataset_code`.
+- **`area_classification`.** *Optional* (`--enrich-areas`) and **not** source
+  FAOSTAT data — it is a heuristic (note the `confidence` and
+  `classification_source` columns), kept in its own table so it is never confused
+  with what FAOSTAT published.
+
+## Rendering this document
+
+This is a [Quarto](https://quarto.org/) document. With Quarto installed:
+
+```bash
+quarto render docs/schema.qmd          # -> docs/schema.html
+```
+
+The same diagram is embedded in the project [README](../README.md); GitHub renders
+the ```` ```mermaid ```` block there directly, so you don't need Quarto just to see
+it.

@@ -7,13 +7,32 @@
 [build]
 database = "faostat.duckdb"             # filename; final DB is written under $FABIO_DUCKDB_DIR
                                         #   override: FAOSTATDB_DATABASE
-download_dir = "faostat_temp_download"  # temporary raw ZIPs, project-local, deleted after build
+download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
                                         #   override: FAOSTATDB_DOWNLOAD_DIR
-keep_archives = false                   # override: FAOSTATDB_KEEP_ARCHIVES
-jobs = 6                                # override: FAOSTATDB_JOBS
-overwrite = false                       # override: FAOSTATDB_OVERWRITE
+keep_archives = false                   # delete cached .zip after a successful build
+                                        #   (hot restart still reuses them after a
+                                        #   failure); set true for fast iteration.
+                                        #   override: FAOSTATDB_KEEP_ARCHIVES
+jobs = 0                                # parallel downloads; 0 = auto min(8, 2*cpu)
+                                        #   override: FAOSTATDB_JOBS
+overwrite = false                       # true wipes the DB before building
+                                        #   override: FAOSTATDB_OVERWRITE
+compact = true                          # rewrite the finished DB to reclaim space
+                                        #   override: FAOSTATDB_COMPACT
+keep_raw_tables = false                 # keep untouched raw_<code> copies (debug)
+                                        #   override: FAOSTATDB_KEEP_RAW_TABLES
 
 [datasets]
 mode = "all"                            # all | include | exclude; override: FAOSTATDB_DATASETS_MODE
 include = []                            # override: FAOSTATDB_DATASETS_INCLUDE (comma-separated)
 exclude = ["FA", "CBH"]                 # override: FAOSTATDB_DATASETS_EXCLUDE (comma-separated)
+
+[performance]
+import_threads = 0                      # DuckDB import threads; 0 = DuckDB default
+                                        #   override: FAOSTATDB_IMPORT_THREADS
+memory_limit = ""                       # e.g. "8GB"; "" = DuckDB default
+                                        #   override: FAOSTATDB_MEMORY_LIMIT
+
+[enrichment]
+area_classification = false             # add optional (non-source) area country/region flags
+                                        #   override: FAOSTATDB_ENRICH_AREAS

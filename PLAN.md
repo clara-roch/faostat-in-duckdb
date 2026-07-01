@@ -129,8 +129,24 @@ exclude = ["FA", "CBH"]
 - **Integration**: download + import of one small dataset against a fixture/recorded archive.
 - **CI**: GitHub Actions matrix on `ubuntu-latest`, `macos-latest`, `windows-latest`; small/deterministic tests only (no full FAOSTAT download in CI).
 
-## Out of scope (v0.2+)
+## Status beyond v0.1 (now implemented)
 
-Dimension tables and label removal, `column_mapping` table, row-count validation, `faostatdb
-validate` / `faostatdb info`, area enrichment, historical country-validity metadata, rich
-progress UI polish, optional `raw_` tables, unified `faostat_data_long` view, concurrency benchmarking.
+The following v0.2 / v0.3 items from `FAOSTATdb.md` have since been implemented and are
+covered by tests + a real end-to-end smoke build:
+
+- Dimension tables + label removal (`dim_<stem>`), keyed by `(dataset_code, <stem>_code)`.
+- Flag legend → `dim_flag`; `faostat_column_mapping`; constant-column removal.
+- Labelled convenience views (`view_<code>_labelled`).
+- `faostatdb info` / `validate` / `clean-cache` / `sql` / `config init` / `self-contained`.
+- Row-count validation vs declared `FileRows` (advisory), declared-size check helper.
+- Adaptive default concurrency (`jobs = min(8, 2*cpu)`), `[performance]` PRAGMAs.
+- JSON / ASCII / no-progress reporting modes; rich download bars.
+- Final DB compaction (`COPY FROM DATABASE`) to reclaim space.
+- Optional `raw_<code>` tables (`--keep-raw-tables`) and area enrichment (`--enrich-areas`).
+- Hot-restart archive reuse; `keep_archives` (default false) deletes archives only on a
+  *successful* build, and can be set true to persist the cache for fast re-runs.
+
+### Still out of scope
+
+Historical country-validity dates (e.g. USSR `valid_from`/`valid_to`) require a curated
+external gazetteer we don't ship; unified `faostat_data_long` view; concurrency benchmarking.

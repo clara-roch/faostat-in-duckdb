@@ -23,9 +23,16 @@ Do not re-litigate these without reason — they are settled in `FAOSTATdb.md`:
 - **Dependencies**: required `duckdb` only; optional `rich` (progress UI) and `platformdirs` (cache dirs).
   Use stdlib `zipfile` (archive integrity via `testzip()`) and `tomllib` (config) — no external `zip`, no YAML.
 - **Import**: read CSVs with DuckDB's `read_csv` directly — **never pandas**.
-- **Storage model**: one fact table per dataset (`data_<code>`); dimension tables and label
-  removal are deferred to v0.2.
-- **Config**: TOML.
+- **Storage model**: one fact table per dataset (`data_<code>`). Repeated labels are lifted
+  into shared `dim_<stem>` tables keyed by `(dataset_code, <stem>_code)`; flag descriptions
+  go to `dim_flag`; constant columns are dropped into `faostat_constant_column`; and a
+  `view_<code>_labelled` re-joins the labels. All lossless. (v0.2 — implemented.)
+- **Smallest file**: after building, the DB is rewritten with `COPY FROM DATABASE`
+  (see `compact.py`) because DuckDB's `DROP COLUMN` does not reclaim space on its own.
+- **Config**: TOML. `keep_archives` defaults to **false** (delete cached `.zip` on a
+  *successful* build), but the hot-restart manifest still reuses archives after an
+  interrupted/failed run — they are never deleted before the build succeeds. Set
+  `keep_archives = true` to persist the cache across successful builds.
 
 ## Conventions
 
