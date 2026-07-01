@@ -46,6 +46,7 @@ ENV_DATASETS_EXCLUDE = "FAOSTATDB_DATASETS_EXCLUDE"
 ENV_IMPORT_THREADS = "FAOSTATDB_IMPORT_THREADS"
 ENV_MEMORY_LIMIT = "FAOSTATDB_MEMORY_LIMIT"
 ENV_ENRICH_AREAS = "FAOSTATDB_ENRICH_AREAS"
+ENV_ENRICH_HISTORY = "FAOSTATDB_ENRICH_HISTORY"
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,9 @@ class EnrichmentConfig:
     """
 
     area_classification: bool = False
+    # Fill valid_from / valid_to in area_classification from the curated
+    # historical gazetteer (implies area_classification). See enrich.enrich_history.
+    historical_validity: bool = False
 
 
 @dataclass(frozen=True)
@@ -223,6 +227,8 @@ def apply_env_overrides(base: Config, env: dict[str, str] | None = None) -> Conf
     enrich_updates: dict[str, Any] = {}
     if (v := src.get(ENV_ENRICH_AREAS)) is not None:
         enrich_updates["area_classification"] = _as_bool(v)
+    if (v := src.get(ENV_ENRICH_HISTORY)) is not None:
+        enrich_updates["historical_validity"] = _as_bool(v)
 
     return Config(
         build=replace(base.build, **build_updates) if build_updates else base.build,
@@ -322,4 +328,5 @@ def config_to_toml(cfg: Config) -> str:
         "\n"
         "[enrichment]\n"
         f"area_classification = {_b(cfg.enrichment.area_classification)}\n"
+        f"historical_validity = {_b(cfg.enrichment.historical_validity)}\n"
     )

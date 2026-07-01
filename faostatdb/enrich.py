@@ -6,12 +6,21 @@ confused with what FAOSTAT actually published. So this lives in its own table,
 carries an explicit ``classification_source`` + ``confidence``, and only runs
 when ``[enrichment] area_classification = true`` (or ``--enrich-areas``).
 
-The classification here is a **heuristic**, not an authoritative gazetteer:
-FAOSTAT area codes at or above 5000 are regional/economic aggregates ("World",
-"Africa", "European Union", …), everything below is treated as an individual
-country/territory. Historical validity (``valid_from`` / ``valid_to`` — e.g. the
-USSR dissolving in 1991) needs a curated external source we don't ship, so those
-columns exist for schema stability but are left NULL rather than guessed.
+Two enrichment steps live here:
+
+* :func:`enrich_areas` — a **heuristic** country/region/aggregate classification.
+  FAOSTAT area codes at or above 5000 are regional/economic aggregates ("World",
+  "Africa", "European Union", …); everything below is treated as an individual
+  country/territory. Confidence is ``low`` because it is a rule of thumb.
+* :func:`enrich_history` — a small **curated gazetteer** filling ``valid_from`` /
+  ``valid_to`` for the well-known dissolved / renamed / newly-formed FAOSTAT areas
+  (USSR, Czechoslovakia, Sudan (former) → South Sudan, …). These are widely
+  documented political transition years, so matched rows are marked ``high``
+  confidence with an explicit ``classification_source``. Areas not in the
+  gazetteer keep whatever :func:`enrich_areas` left (validity NULL) — we never
+  guess a date. This is the opt-in ``historical_validity`` layer from
+  FAOSTATdb.md, kept deliberately conservative because, as the spec warns,
+  "historical country validity is a delicate issue".
 """
 
 from __future__ import annotations
@@ -105,3 +114,93 @@ def enrich_areas(con) -> int:
     )
     (n,) = con.execute("SELECT COUNT(*) FROM area_classification").fetchone()
     return n
+
+
+# --- Historical country-validity gazetteer ---------------------------------
+#
+# A small, hand-curated table of the FAOSTAT areas whose existence as a distinct
+# reporting entity started or ended within (or just before) FAOSTAT's coverage.
+# Each entry records only the transition year(s) that a FAOSTAT user actually
+# needs to interpret a time series correctly:
+#
+#   * ``valid_to``   — the last year a dissolved / merged entity reports data.
+#   * ``valid_from`` — the first year a newly-formed / split-off entity reports.
+#
+# The *other* bound is left ``None`` on purpose: we assert only the well-agreed
+# political transition year, not a founding year we would have to hand-wave. All
+# dates below are widely documented (e.g. the USSR dissolved in 1991, South Sudan
+# separated from Sudan in 2011), so matches are recorded at ``high`` confidence.
+# China-family codes are deliberately omitted — the mainland / Taiwan / Hong Kong
+# / Macao split is genuinely delicate and we would rather under-claim than guess.
+#
+# Keys are the canonical FAOSTAT English area labels, matched case-insensitively
+# against ``dim_area.area_label``. Matching by label (not numeric code) keeps this
+# auditable and stable across the different code systems FAOSTAT uses.
+GAZETTEER_SOURCE = "faostatdb-gazetteer-v1"
+
+# label -> (valid_from, valid_to)
+HISTORICAL_VALIDITY: dict[str, tuple[str | None, str | None]] = {
+    # Dissolved / merged entities: we know the last reporting year.
+    "USSR": (None, "1991"),
+    "Czechoslovakia": (None, "1992"),
+    "Yugoslav SFR": (None, "1992"),
+    "Serbia and Montenegro": ("1992", "2006"),
+    "Ethiopia PDR": (None, "1992"),
+    "Sudan (former)": (None, "2011"),
+    "Belgium-Luxembourg": (None, "1999"),
+    "Netherlands Antilles (former)": (None, "2010"),
+    "Yemen Ar Rp": (None, "1990"),
+    "Yemen Dem": (None, "1990"),
+    "Pacific Islands Trust Territory": (None, "1991"),
+    # Newly-formed / split-off entities: we know the first reporting year.
+    "South Sudan": ("2011", None),
+    "Serbia": ("2006", None),
+    "Montenegro": ("2006", None),
+    "Eritrea": ("1993", None),
+    "Czechia": ("1993", None),
+    "Slovakia": ("1993", None),
+}
+
+
+def enrich_history(con) -> int:
+    """Fill ``valid_from`` / ``valid_to`` in ``area_classification`` from the gazetteer.
+
+    Requires ``area_classification`` to already exist (build it first with
+    :func:`enrich_areas`). For every row whose ``area_label`` matches a curated
+    entry (case-insensitively), the known validity bound(s) are written and the
+    row is re-stamped ``classification_source = 'faostatdb-gazetteer-v1'`` /
+    ``confidence = 'high'``. Rows with no gazetteer entry are left untouched, so
+    the layer only ever *adds* explicitly-sourced facts.
+
+    Returns the number of area rows updated (0 if there is no
+    ``area_classification`` table or nothing matched). Idempotent.
+    """
+    if not table_exists(con, "area_classification"):
+        return 0
+    if "area_label" not in {
+        d[0] for d in con.execute("SELECT * FROM area_classification LIMIT 0").description
+    }:
+        return 0  # nothing to match on
+
+    updated = 0
+    for label, (valid_from, valid_to) in HISTORICAL_VALIDITY.items():
+        # Case-insensitive exact-label match; TRIM guards stray whitespace.
+        con.execute(
+            """
+            UPDATE area_classification
+            SET valid_from = ?,
+                valid_to = ?,
+                classification_source = ?,
+                confidence = 'high'
+            WHERE lower(trim(area_label)) = lower(?)
+            """,
+            [valid_from, valid_to, GAZETTEER_SOURCE, label],
+        )
+        # DuckDB's UPDATE doesn't return a rowcount via execute(); count matches.
+        (matched,) = con.execute(
+            "SELECT COUNT(*) FROM area_classification "
+            "WHERE lower(trim(area_label)) = lower(?)",
+            [label],
+        ).fetchone()
+        updated += matched
+    return updated

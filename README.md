@@ -68,6 +68,7 @@ for the top-level summary, and `faostatdb <command> --help` for any one of them.
 | `faostatdb clean-cache` | Deletes cached archives (`*.zip`/`*.part`) and the download manifest from the download directory, and reports how much was freed. |
 | `faostatdb sql "<query>"` | Runs one SQL query against a built database (read-only) and prints an aligned text table — a convenience wrapper, no pandas required. |
 | `faostatdb self-contained -o faostatdb.pyz` | Bundles the package into a single executable `.pyz` (stdlib `zipapp`) you can drop in `~/.local/bin`. Run it with `python faostatdb.pyz build …`. |
+| `faostatdb bench --include QCL,FBS` | Measures **download throughput** at several `--jobs` levels (re-downloading the given datasets each time) so you can pick the best concurrency for your connection. Requires an explicit `--include`; never benchmarks the whole inventory. |
 
 ### `faostatdb build`
 
@@ -75,7 +76,8 @@ for the top-level summary, and `faostatdb <command> --help` for any one of them.
 faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
                 [--jobs N] [--keep-archives | --no-keep-archives] \
                 [--download-dir DIR] [--yes] [--strict] \
-                [--no-compact] [--keep-raw-tables] [--enrich-areas] \
+                [--no-compact] [--keep-raw-tables] \
+                [--enrich-areas] [--enrich-history] \
                 [--json] [--ascii] [--no-progress]
 ```
 
@@ -85,13 +87,14 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 | `--include QCL,FBS` | Build **only** these codes (selection mode → `include`). |
 | `--exclude FA,CBH` | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given. |
 | `--jobs N` | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`). |
-| `--keep-archives` / `--no-keep-archives` | Force keeping / deleting the cached `*.zip` after a successful build. Default: **keep**. |
+| `--keep-archives` / `--no-keep-archives` | Force keeping / deleting the cached `*.zip` after a successful build. Default: **delete** on success (`keep_archives = false`); hot restart still reuses them after a failure. |
 | `--download-dir DIR` | Where raw archives are cached (overrides `build.download_dir`). |
 | `--yes` (alias `--all`) | Skip the confirmation prompt. **Required** for non-interactive runs (CI/scripts). |
 | `--strict` | Abort the whole build on the first error. Without it, failed datasets are recorded + skipped and the rest continue. |
 | `--no-compact` | Skip the final compaction pass (faster, but a larger file — see [Making the database small](#making-the-database-as-small-as-possible)). |
 | `--keep-raw-tables` | Also keep an untouched `raw_<code>` copy of each import (debugging losslessness). |
 | `--enrich-areas` | Add the optional, clearly-labelled `area_classification` table (country vs. aggregate). Off by default; not source FAOSTAT content. |
+| `--enrich-history` | Fill `valid_from`/`valid_to` on `area_classification` for well-known former/successor areas (USSR, Sudan (former) → South Sudan, …) from a small curated gazetteer. Implies `--enrich-areas`. Off by default. |
 | `--json` | Emit machine-readable JSON-lines progress on **stdout** (human logs stay on stderr). Great for CI. |
 | `--ascii` | Use ASCII status icons (`[OK]`/`[X]`) instead of Unicode (`✓`/`✗`). |
 | `--no-progress` | Suppress animated progress bars (per-dataset event lines still print). |
@@ -145,6 +148,35 @@ FAOSTATdb is built so you pay that cost **once**:
   `--keep-archives` (or `keep_archives = true`) to persist the cache across
   successful builds; use `faostatdb clean-cache` to wipe it on demand.
 
+### Tuning download concurrency (`faostatdb bench`)
+
+The one performance knob for downloads is `--jobs` (how many archives fetch in
+parallel). The best value depends on your connection and the FAO server, so rather
+than guess, measure it:
+
+```bash
+faostatdb bench --include QCL,FBS,RL --jobs-list 1,2,4,8 --yes
+```
+
+This downloads the listed datasets fresh at each concurrency level and prints a
+small table of wall-clock time and MB/s, flagging the fastest level with `*`:
+
+```text
+ jobs    wall_s      MB/s   files   fail
+--------------------------------------------
+    1     12.40      6.1        3      0
+    2      6.80     11.1        3      0
+    4      4.10     18.4        3      0 *
+    8      4.30     17.6        3      0
+
+fastest: 4 job(s) at 4.10s
+```
+
+Pick the winner as your `--jobs` (or `jobs` in config). `bench` **requires an
+explicit `--include`** — it re-downloads at every level, so it refuses to point at
+the whole inventory and hammer the server. It keeps no cache (the scratch archives
+are deleted afterwards).
+
 ---
 
 ## The build pipeline
@@ -168,7 +200,8 @@ is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as the installed
 | [`importer.py`](faostatdb/importer.py) | Extracts the main CSV, imports it into `data_<code>` via `read_csv` (**never pandas**), extracts dimensions + the flag legend, records column mappings, and builds the labelled view. |
 | [`schema.py`](faostatdb/schema.py) | Column-name normalization, dimension detection, labelled-view generation, and metadata-table DDL. |
 | [`compact.py`](faostatdb/compact.py) | Rewrites the finished database into a fresh file (`COPY FROM DATABASE`) to reclaim space from dropped columns. |
-| [`enrich.py`](faostatdb/enrich.py) | Optional, clearly-separated `area_classification` enrichment. |
+| [`enrich.py`](faostatdb/enrich.py) | Optional, clearly-separated enrichment: heuristic `area_classification` plus a curated historical-validity gazetteer (`valid_from`/`valid_to`). |
+| [`bench.py`](faostatdb/bench.py) | Download-concurrency benchmarking core (network-free, injectable) behind `faostatdb bench`. |
 | [`progress.py`](faostatdb/progress.py) | Human/JSON/ASCII/quiet progress reporting — `rich` bars if installed, plain lines otherwise. |
 
 ### Order of calls during `faostatdb build`
@@ -184,7 +217,8 @@ is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as the installed
 7. **Import** (sequential) — `importer.import_archive()`: `read_csv` →
    `data_<code>` → dimension extraction → constant-column removal → flag legend →
    column mapping → labelled view.
-8. **Enrich** (optional) — `enrich.enrich_areas()` if `--enrich-areas`.
+8. **Enrich** (optional) — `enrich.enrich_areas()` if `--enrich-areas`, then
+   `enrich.enrich_history()` if `--enrich-history` (fills `valid_from`/`valid_to`).
 9. **Record** — provenance rows in `faostat_dataset` / `faostat_build`.
 10. **Compact** — `compact.compact_database()` rewrites the file to its smallest form.
 
@@ -402,8 +436,13 @@ erDiagram
     }
     area_classification {
         VARCHAR area_code PK
+        VARCHAR area_label
         BOOLEAN is_country
+        BOOLEAN is_region
         BOOLEAN is_aggregate
+        VARCHAR classification_source
+        VARCHAR valid_from
+        VARCHAR valid_to
         VARCHAR confidence
     }
 ```
@@ -425,6 +464,10 @@ erDiagram
   renamed, and which constant columns were lifted out (with their value).
 - **`area_classification`** — *optional* (`--enrich-areas`), and explicitly **not**
   source FAOSTAT content (it carries a `confidence` and a `classification_source`).
+  With `--enrich-history` its `valid_from`/`valid_to` are filled for the well-known
+  former/successor areas (USSR, Sudan (former) → South Sudan, …) from a small curated
+  gazetteer — those rows are marked `confidence = 'high'`; everything else keeps the
+  heuristic `low` classification and NULL validity. We never guess a date we don't have.
 
 ---
 
@@ -664,6 +707,7 @@ memory_limit = ""       # e.g. "8GB"; "" = DuckDB default
 
 [enrichment]
 area_classification = false   # optional, non-source area country/region flags
+historical_validity = false   # fill valid_from/valid_to for former areas (implies area_classification)
 ```
 
 ### Overriding via `secrets.env`

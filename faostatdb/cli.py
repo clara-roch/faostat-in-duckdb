@@ -1,9 +1,9 @@
 """Command-line interface: argument parsing and command dispatch.
 
 Commands: ``list``, ``tables``, ``config show|init``, ``build``, ``info``,
-``validate``, ``clean-cache``, ``sql`` and ``self-contained``. The CLI resolves
-configuration (``faostatdb.toml`` < ``secrets.env`` env vars < flags), then
-delegates to the relevant modules.
+``validate``, ``clean-cache``, ``sql``, ``self-contained`` and ``bench``. The CLI
+resolves configuration (``faostatdb.toml`` < ``secrets.env`` env vars < flags),
+then delegates to the relevant modules.
 
 Read the module top-to-bottom as the pipeline: :func:`main` parses args and
 dispatches; :func:`run_build` is the download → validate → import → enrich →
@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="add the optional (non-source) area classification table",
     )
+    p_build.add_argument(
+        "--enrich-history",
+        action="store_true",
+        help="fill valid_from/valid_to for former areas from the curated "
+        "gazetteer (implies --enrich-areas)",
+    )
     p_build.add_argument("--json", action="store_true", help="emit JSON-lines progress")
     p_build.add_argument("--ascii", action="store_true", help="use ASCII status icons")
     p_build.add_argument(
@@ -108,6 +114,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", "-o", default="faostatdb.pyz", help="output .pyz path"
     )
 
+    # bench ----------------------------------------------------------------
+    p_bench = sub.add_parser(
+        "bench",
+        help="benchmark download throughput at several --jobs levels",
+    )
+    p_bench.add_argument(
+        "--include",
+        default=None,
+        help="comma-separated dataset codes to benchmark (required: benchmarking "
+        "the whole inventory would hammer the FAO server)",
+    )
+    p_bench.add_argument(
+        "--jobs-list",
+        default="1,2,4,8",
+        help="comma-separated concurrency levels to test (default: 1,2,4,8)",
+    )
+    p_bench.add_argument("--download-dir", default=None, help="scratch download dir")
+    p_bench.add_argument(
+        "--yes", "--all", action="store_true", help="assume yes for prompts"
+    )
+
     return parser
 
 
@@ -127,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "clean-cache": _cmd_clean_cache,
         "sql": _cmd_sql,
         "self-contained": _cmd_self_contained,
+        "bench": _cmd_bench,
     }
     handler = dispatch.get(args.command)
     if handler is None:
@@ -479,13 +507,20 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
             if not cfg.build.keep_archives:
                 archive.unlink(missing_ok=True)
 
-        # Optional enrichment (clearly non-source; opt-in).
-        if cfg.enrichment.area_classification:
+        # Optional enrichment (clearly non-source; opt-in). Historical validity
+        # augments the classification table, so it requires the base table too.
+        if cfg.enrichment.area_classification or cfg.enrichment.historical_validity:
             from . import enrich as enrich_mod
 
             n = enrich_mod.enrich_areas(con)
             if n:
                 reporter.log(f"enriched {n:,} area(s) into area_classification")
+            if cfg.enrichment.historical_validity:
+                h = enrich_mod.enrich_history(con)
+                if h:
+                    reporter.log(
+                        f"filled historical validity for {h:,} former/successor area(s)"
+                    )
 
         _record_build(con, build_id, started_at, snapshot, cfg, len(imported), len(failed))
         con.execute("CHECKPOINT")
@@ -688,6 +723,103 @@ def _cmd_self_contained(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _cmd_bench(args: argparse.Namespace, cfg: Config) -> int:
+    """Benchmark download throughput at several ``--jobs`` levels (FAOSTATdb.md v0.3).
+
+    Deliberately requires an explicit ``--include`` list: benchmarking downloads
+    the archives fresh at *every* concurrency level, so pointing it at the whole
+    inventory would download hundreds of files repeatedly and hammer the FAO
+    server. Each level re-downloads into a scratch directory (cleared between
+    levels) so timings reflect real cold fetches, not the OS/HTTP cache.
+    """
+    from . import bench as bench_mod
+    from . import download as download_mod
+    from . import paths as paths_mod
+
+    if not args.include:
+        print(
+            "bench: pass --include with a small set of dataset codes "
+            "(e.g. --include QCL,FBS,RL) — refusing to benchmark the whole inventory",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        jobs_levels = [int(x) for x in args.jobs_list.split(",") if x.strip()]
+    except ValueError:
+        print(f"bench: bad --jobs-list {args.jobs_list!r}", file=sys.stderr)
+        return 2
+    if not jobs_levels:
+        print("bench: --jobs-list produced no levels", file=sys.stderr)
+        return 2
+
+    codes = _split_codes(args.include)
+    snapshot = metadata_mod.fetch_and_parse()
+    by_code = {d.code: d for d in snapshot.datasets}
+    tasks: list = []
+    missing: list[str] = []
+    for code in codes:
+        rec = by_code.get(code)
+        if rec is None or not rec.file_location:
+            missing.append(code)
+            continue
+        tasks.append(bench_mod.BenchTask(code=code, url=rec.file_location))
+    if missing:
+        print(f"bench: unknown/downloadless codes ignored: {', '.join(missing)}",
+              file=sys.stderr)
+    if not tasks:
+        print("bench: no benchmarkable datasets selected", file=sys.stderr)
+        return 1
+
+    total_mb = sum(
+        (metadata_mod.parse_size_bytes(by_code[t.code].file_size) or 0)
+        for t in tasks
+    ) / 1_000_000
+    print(
+        f"benchmarking {len(tasks)} dataset(s) at jobs levels {jobs_levels} "
+        f"(~{total_mb:.0f} MB per level, re-downloaded each level)",
+        file=sys.stderr,
+    )
+    if not args.yes and sys.stdin.isatty():
+        if input("Continue? [y/N] ").strip().lower() not in {"y", "yes"}:
+            print("aborted", file=sys.stderr)
+            return 1
+    elif not args.yes and not sys.stdin.isatty():
+        print("non-interactive: pass --yes to benchmark", file=sys.stderr)
+        return 1
+
+    bench_dir = paths_mod.resolve_download_dir(
+        args.download_dir or None, keep_archives=False
+    ) / "bench"
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    def clear_dir(_jobs: int) -> None:
+        # Force a cold download at each level: remove any archives from the last.
+        for f in bench_dir.glob("*"):
+            if f.is_file():
+                f.unlink(missing_ok=True)
+
+    def download(task) -> int:
+        dest = bench_dir / f"{task.code}.zip"
+        download_mod.download_with_retry(task.url, dest)
+        return dest.stat().st_size if dest.exists() else 0
+
+    results = bench_mod.run_download_benchmark(
+        tasks, jobs_levels, downloader=download, before_level=clear_dir
+    )
+    # Clean up the scratch archives (bench never keeps a cache).
+    clear_dir(0)
+    for f in bench_dir.glob("*"):
+        f.unlink(missing_ok=True)
+    try:
+        bench_dir.rmdir()
+    except OSError:
+        pass
+
+    print(bench_mod.format_bench_table(results))
+    return 0
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -876,6 +1008,12 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
     enrichment = cfg.enrichment
     if args.enrich_areas:
         enrichment = replace(enrichment, area_classification=True)
+    if args.enrich_history:
+        # History fills valid_from/valid_to on the classification table, so it
+        # implies the base area classification as well.
+        enrichment = replace(
+            enrichment, area_classification=True, historical_validity=True
+        )
 
     datasets = cfg.datasets
     if args.include is not None:

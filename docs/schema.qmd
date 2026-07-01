@@ -106,8 +106,13 @@ erDiagram
     }
     area_classification {
         VARCHAR area_code PK
+        VARCHAR area_label
         BOOLEAN is_country
+        BOOLEAN is_region
         BOOLEAN is_aggregate
+        VARCHAR classification_source
+        VARCHAR valid_from
+        VARCHAR valid_to
         VARCHAR confidence
     }
 ```
@@ -139,7 +144,11 @@ erDiagram
 - **`area_classification`.** *Optional* (`--enrich-areas`) and **not** source
   FAOSTAT data — it is a heuristic (note the `confidence` and
   `classification_source` columns), kept in its own table so it is never confused
-  with what FAOSTAT published.
+  with what FAOSTAT published. With `--enrich-history` the `valid_from`/`valid_to`
+  columns are filled for the well-known former/successor areas (USSR,
+  Sudan (former) → South Sudan, …) from a small curated gazetteer — those rows are
+  stamped `confidence = 'high'`; areas absent from the gazetteer keep the heuristic
+  `low` classification and NULL validity (we never guess a date we don't have).
 
 ## Rendering this document
 

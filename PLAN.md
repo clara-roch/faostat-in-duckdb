@@ -145,8 +145,19 @@ covered by tests + a real end-to-end smoke build:
 - Optional `raw_<code>` tables (`--keep-raw-tables`) and area enrichment (`--enrich-areas`).
 - Hot-restart archive reuse; `keep_archives` (default false) deletes archives only on a
   *successful* build, and can be set true to persist the cache for fast re-runs.
+- **Historical country-validity metadata** (`--enrich-history` / `[enrichment]
+  historical_validity`): a small curated gazetteer fills `valid_from`/`valid_to` on
+  `area_classification` for the well-known dissolved/renamed/newly-formed FAOSTAT areas
+  (USSR, Czechoslovakia, Sudan (former) → South Sudan, …) at `high` confidence; areas
+  not in the gazetteer keep NULL validity (we never guess a date). See `faostatdb/enrich.py`.
+- **Concurrency benchmarking** (`faostatdb bench --include CODE,… [--jobs-list 1,2,4,8]`):
+  re-downloads a small explicit dataset set at each `--jobs` level and reports wall-clock
+  time and MB/s so the best concurrency can be chosen empirically. The scheduling/timing
+  core (`faostatdb/bench.py`) is network-free and unit-tested; the command refuses to run
+  against the whole inventory. This completes the v0.3 list from `FAOSTATdb.md`.
 
 ### Still out of scope
 
-Historical country-validity dates (e.g. USSR `valid_from`/`valid_to`) require a curated
-external gazetteer we don't ship; unified `faostat_data_long` view; concurrency benchmarking.
+Founding-year `valid_from` for long-lived dissolved entities (we assert only the
+well-documented transition year) and China-family area splits — both deliberately left to
+avoid guessing; a unified `faostat_data_long` view across all datasets.

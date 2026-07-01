@@ -26,13 +26,23 @@ Do not re-litigate these without reason — they are settled in `FAOSTATdb.md`:
 - **Storage model**: one fact table per dataset (`data_<code>`). Repeated labels are lifted
   into shared `dim_<stem>` tables keyed by `(dataset_code, <stem>_code)`; flag descriptions
   go to `dim_flag`; constant columns are dropped into `faostat_constant_column`; and a
-  `view_<code>_labelled` re-joins the labels. All lossless. (v0.2 — implemented.)
+  `view_<code>_labelled` re-joins the labels. All lossless. (v0.2/v0.3 — implemented.)
 - **Smallest file**: after building, the DB is rewritten with `COPY FROM DATABASE`
   (see `compact.py`) because DuckDB's `DROP COLUMN` does not reclaim space on its own.
 - **Config**: TOML. `keep_archives` defaults to **false** (delete cached `.zip` on a
   *successful* build), but the hot-restart manifest still reuses archives after an
   interrupted/failed run — they are never deleted before the build succeeds. Set
   `keep_archives = true` to persist the cache across successful builds.
+- **Enrichment is opt-in and clearly non-source** (`faostatdb/enrich.py`, v0.3 — implemented).
+  `--enrich-areas` builds a heuristic `area_classification` (country/region/aggregate,
+  `confidence='low'`); `--enrich-history` fills `valid_from`/`valid_to` from a small curated
+  gazetteer of well-known former/successor FAOSTAT areas (`confidence='high'`, and it implies
+  `--enrich-areas`). Never let enrichment leak into the source tables, and never guess a
+  validity date not in the gazetteer.
+- **Concurrency is benchmarked, not guessed** (`faostatdb bench`, `faostatdb/bench.py`, v0.3).
+  The one concurrency knob is `build.jobs` (parallel downloads); `bench` measures throughput
+  at several `--jobs` levels. Its scheduling/timing core is network-free and unit-tested;
+  the command refuses to run against the whole inventory.
 
 ## Conventions
 
@@ -56,8 +66,11 @@ workflow is:
 - Install for development: `pip install -e ".[ui]"` (or `uv pip install -e ".[ui]"`)
 - Run without installing: `python -m faostatdb ...`
 - Run tests: `pytest`
-- CLI surface (v0.1): `faostatdb list`, `faostatdb config init|show`, `faostatdb build`
-  (`--include` / `--exclude` / `--jobs` / `--keep-archives` / `--download-dir` / `--yes` / `--strict`).
+- CLI surface: `faostatdb list`, `tables`, `config init|show`, `build`
+  (`--include` / `--exclude` / `--jobs` / `--keep-archives` / `--download-dir` / `--yes` /
+  `--strict` / `--enrich-areas` / `--enrich-history` / `--keep-raw-tables` / `--no-compact`),
+  `info`, `validate`, `clean-cache`, `sql`, `self-contained`, and `bench`
+  (`--include` / `--jobs-list`).
 
 CI runs the test suite on a Linux/macOS/Windows matrix; keep CI tests small and
 deterministic — never trigger a full FAOSTAT download in CI.
