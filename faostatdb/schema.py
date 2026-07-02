@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS faostat_dataset (
     file_size_raw        BIGINT,
     file_rows_declared   BIGINT,
     rows_imported        BIGINT,
+    source_csv_rows      BIGINT,
     downloaded_at        TIMESTAMP,
     source_metadata_url  VARCHAR,
     source_metadata_hash VARCHAR,

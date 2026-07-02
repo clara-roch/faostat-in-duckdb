@@ -25,6 +25,7 @@ Everything above is reversible/auditable, so the mirror stays faithful to source
 from __future__ import annotations
 
 import codecs
+import csv
 import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -66,15 +67,85 @@ def detect_encoding(csv_path: Path) -> str:
     return "utf-8"
 
 
+def count_physical_data_rows(csv_path: Path) -> int:
+    """Data-row count assuming one record per physical line, via a raw byte scan.
+
+    Counts newline-terminated lines (adding one for a missing final newline) and
+    drops the header. This equals the true record count whenever no field holds an
+    embedded, quoted newline — the normal case for FAOSTAT bulk CSVs. It is a fast
+    C-level scan (``bytes.count``) used as the first pass of :func:`count_source_rows`.
+    """
+    newlines = 0
+    last = b""
+    with open(csv_path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            newlines += chunk.count(b"\n")
+            last = chunk[-1:]
+    if last == b"":
+        return 0  # empty file: no header, no rows
+    physical_lines = newlines + (0 if last == b"\n" else 1)
+    return max(physical_lines - 1, 0)  # drop the header line
+
+
+def count_csv_records(csv_path: Path, encoding: str) -> int:
+    """Exact data-record count using Python's stdlib CSV reader (header excluded).
+
+    This is an *independent* parser — deliberately not DuckDB — that honours
+    RFC 4180 quoting, so a quoted embedded newline is counted as part of a single
+    record. It streams the file and is only used to cross-check DuckDB when the
+    fast :func:`count_physical_data_rows` disagrees with the imported count.
+    """
+    py_encoding = {
+        "utf-8": "utf-8-sig",  # tolerate a BOM without turning it into data
+        "utf-16": "utf-16",
+        "latin-1": "latin-1",
+    }.get(encoding, "utf-8-sig")
+    with open(csv_path, "r", encoding=py_encoding, newline="") as f:
+        reader = csv.reader(f)
+        try:
+            next(reader)  # discard the header row
+        except StopIteration:
+            return 0
+        return sum(1 for _ in reader)
+
+
+def count_source_rows(csv_path: Path, encoding: str, imported: int) -> tuple[int, str]:
+    """Return ``(source_rows, method)``: the record count of the *delivered CSV*.
+
+    Fast path — a physical line count — is exact when the file has no multi-line
+    quoted fields, so if it already matches ``imported`` the import is provably
+    lossless and we stop there. Only on a mismatch do we pay for the exact,
+    quote-aware :func:`count_csv_records`, which resolves whether the difference is
+    a benign multi-line field (still lossless) or a genuine parsing discrepancy.
+    """
+    physical = count_physical_data_rows(csv_path)
+    if physical == imported:
+        return physical, "line-count"
+    return count_csv_records(csv_path, encoding), "csv-parse"
+
+
 @dataclass(frozen=True)
 class ImportResult:
-    """What one dataset import produced, for logging and metadata recording."""
+    """What one dataset import produced, for logging and metadata recording.
+
+    ``row_count`` is what DuckDB loaded into the fact table; ``source_row_count`` is
+    the number of data records found in the *delivered CSV*, counted independently
+    of DuckDB (see :func:`count_source_rows`). ``count_method`` records how that
+    reference count was obtained. The import is lossless iff the two agree.
+    """
 
     dataset_code: str
     table_name: str
     row_count: int
+    source_row_count: int = 0
+    count_method: str = "line-count"
     labelled_view: str | None = None
     flag_rows: int = 0
+
+    @property
+    def lossless(self) -> bool:
+        """True when DuckDB loaded exactly as many rows as the source CSV holds."""
+        return self.row_count == self.source_row_count
 
 
 def table_name_for(dataset_code: str) -> str:
@@ -167,6 +238,11 @@ def import_csv(
 
     (count,) = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
 
+    # Verify losslessness against the delivered CSV itself — counted independently
+    # of DuckDB — rather than the approximate FileRows metadata. Dimension/constant
+    # reduction below only drops columns, never rows, so this count stays valid.
+    source_rows, method = count_source_rows(csv_path, encoding, count)
+
     # Keep an untouched copy *before* any reduction, for debugging losslessness.
     if keep_raw:
         raw_table = raw_table_name_for(dataset_code)
@@ -176,7 +252,13 @@ def import_csv(
     record_column_mapping(con, dataset_code, table, raw_cols, norm_cols)
     extract_dimensions(con, table, dataset_code, norm_cols)
     extract_constant_columns(con, table, dataset_code)
-    return ImportResult(dataset_code=dataset_code, table_name=table, row_count=count)
+    return ImportResult(
+        dataset_code=dataset_code,
+        table_name=table,
+        row_count=count,
+        source_row_count=source_rows,
+        count_method=method,
+    )
 
 
 def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str]) -> None:

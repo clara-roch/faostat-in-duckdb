@@ -34,9 +34,11 @@ memory_limit = ""                       # e.g. "8GB"; "" = DuckDB default
                                         #   override: FAOSTATDB_MEMORY_LIMIT
 
 [enrichment]
-area_classification = false             # add optional (non-source) area country/region flags
+area_classification = true              # add (non-source) area country/region flags
+                                        #   set false / --no-enrich-areas to skip.
                                         #   override: FAOSTATDB_ENRICH_AREAS
-historical_validity = false             # fill valid_from/valid_to for former areas
+historical_validity = true              # fill valid_from/valid_to for former areas
                                         #   (USSR, Sudan (former), …) from a curated
                                         #   gazetteer; implies area_classification.
+                                        #   set false / --no-enrich-history to skip.
                                         #   override: FAOSTATDB_ENRICH_HISTORY

@@ -33,11 +33,13 @@ Do not re-litigate these without reason — they are settled in `FAOSTATdb.md`:
   *successful* build), but the hot-restart manifest still reuses archives after an
   interrupted/failed run — they are never deleted before the build succeeds. Set
   `keep_archives = true` to persist the cache across successful builds.
-- **Enrichment is opt-in and clearly non-source** (`faostatdb/enrich.py`, v0.3 — implemented).
-  `--enrich-areas` builds a heuristic `area_classification` (country/region/aggregate,
-  `confidence='low'`); `--enrich-history` fills `valid_from`/`valid_to` from a small curated
-  gazetteer of well-known former/successor FAOSTAT areas (`confidence='high'`, and it implies
-  `--enrich-areas`). Never let enrichment leak into the source tables, and never guess a
+- **Enrichment is on by default and clearly non-source** (`faostatdb/enrich.py`, v0.3 — implemented).
+  It builds a heuristic `area_classification` (country/region/aggregate, `confidence='low'`)
+  and fills `valid_from`/`valid_to` from a small curated gazetteer of well-known
+  former/successor FAOSTAT areas (`confidence='high'`). Disable per-run with
+  `--no-enrich-areas` / `--no-enrich-history` (history implies areas), or via `[enrichment]`
+  in config. Enrichment stays in its own tables with an explicit `confidence` +
+  `classification_source`: never let it leak into the source tables, and never guess a
   validity date not in the gazetteer.
 - **Concurrency is benchmarked, not guessed** (`faostatdb bench`, `faostatdb/bench.py`, v0.3).
   The one concurrency knob is `build.jobs` (parallel downloads); `bench` measures throughput
@@ -68,7 +70,8 @@ workflow is:
 - Run tests: `pytest`
 - CLI surface: `faostatdb list`, `tables`, `config init|show`, `build`
   (`--include` / `--exclude` / `--jobs` / `--keep-archives` / `--download-dir` / `--yes` /
-  `--strict` / `--enrich-areas` / `--enrich-history` / `--keep-raw-tables` / `--no-compact`),
+  `--strict` / `--enrich-areas` / `--no-enrich-areas` / `--enrich-history` /
+  `--no-enrich-history` / `--keep-raw-tables` / `--no-compact`),
   `info`, `validate`, `clean-cache`, `sql`, `self-contained`, and `bench`
   (`--include` / `--jobs-list`).
 

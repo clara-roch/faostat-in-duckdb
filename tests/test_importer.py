@@ -175,6 +175,43 @@ def test_import_without_flag_sidecar(con, tmp_path):
     assert result.row_count == 8
 
 
+def test_row_count_verified_against_source_csv(con, tmp_path):
+    # The fast line-count path proves losslessness for a normal (no multi-line
+    # field) file: every physical data line becomes exactly one imported row.
+    result = importer_mod.import_archive(con, _make_archive(tmp_path), "QCL", tmp_path / "b")
+    assert result.row_count == 8
+    assert result.source_row_count == 8
+    assert result.count_method == "line-count"
+    assert result.lossless
+
+
+def test_row_count_verification_handles_embedded_newline(con, tmp_path):
+    # A quoted field containing a newline is ONE record, but spans two physical
+    # lines — so the fast line count over-counts and verification must fall back to
+    # the exact CSV parse, which agrees with DuckDB (still lossless).
+    main = MAIN_CSV.replace('"Wheat"', '"Winter\nwheat"', 1)
+    result = importer_mod.import_archive(
+        con, _make_archive(tmp_path, main=main), "QCL", tmp_path / "b"
+    )
+    assert result.row_count == 8
+    assert result.source_row_count == 8
+    assert result.count_method == "csv-parse"
+    assert result.lossless
+
+
+def test_source_row_counters_agree_on_multiline_file(tmp_path):
+    # Unit-level: the physical counter over-counts a multi-line record while the
+    # exact CSV counter does not — the two disagree exactly when they should.
+    csv_path = tmp_path / "m.csv"
+    csv_path.write_text(
+        '"a","b"\n"1","plain"\n"2","has\nnewline"\n"3","plain"\n', encoding="utf-8"
+    )
+    assert importer_mod.count_physical_data_rows(csv_path) == 4  # over-counts by 1
+    assert importer_mod.count_csv_records(csv_path, "utf-8") == 3  # exact
+    assert importer_mod.count_source_rows(csv_path, "utf-8", imported=3) == (3, "csv-parse")
+    assert importer_mod.count_source_rows(csv_path, "utf-8", imported=4) == (4, "line-count")
+
+
 def test_keep_raw_tables_preserves_untouched_copy(con, tmp_path):
     importer_mod.import_csv(
         con,

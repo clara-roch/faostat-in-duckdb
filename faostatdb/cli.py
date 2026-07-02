@@ -76,13 +76,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument(
         "--enrich-areas",
         action="store_true",
-        help="add the optional (non-source) area classification table",
+        help="build the (non-source) area classification table (on by default)",
+    )
+    p_build.add_argument(
+        "--no-enrich-areas",
+        action="store_true",
+        help="skip the (non-source) area classification table",
     )
     p_build.add_argument(
         "--enrich-history",
         action="store_true",
         help="fill valid_from/valid_to for former areas from the curated "
-        "gazetteer (implies --enrich-areas)",
+        "gazetteer (implies --enrich-areas; on by default)",
+    )
+    p_build.add_argument(
+        "--no-enrich-history",
+        action="store_true",
+        help="skip filling valid_from/valid_to from the historical gazetteer",
     )
     p_build.add_argument("--json", action="store_true", help="emit JSON-lines progress")
     p_build.add_argument("--ascii", action="store_true", help="use ASCII status icons")
@@ -490,17 +500,22 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                 now=_now(),
             )
             _record_dataset(
-                con, rec, snapshot, archive, result.sha256, "imported", dl_at, imp.row_count
+                con, rec, snapshot, archive, result.sha256, "imported", dl_at,
+                imp.row_count, imp.source_row_count,
             )
-            # Row-count sanity check against the declared FileRows (advisory).
-            _check_row_count(rec, imp.row_count, reporter)
-            reporter.event(
-                rec.code,
-                "import",
-                "imported",
-                rows=imp.row_count,
-                message=f"imported {imp.row_count:,} rows into {imp.table_name}",
-            )
+            # Verify losslessness against the delivered CSV (hard check), and note
+            # any divergence from the approximate FileRows metadata (advisory).
+            lossless = _check_row_count(rec, imp, reporter)
+            if lossless:
+                reporter.event(
+                    rec.code,
+                    "import",
+                    "imported",
+                    rows=imp.row_count,
+                    message=f"imported {imp.row_count:,} rows into {imp.table_name}",
+                )
+            elif strict:
+                return 1
 
             # Archive is now fully imported; drop it unless the user asked to keep
             # archives. Done per-dataset so a later failure doesn't strand
@@ -870,31 +885,53 @@ def _human_bytes(n: int | None) -> str:
     return f"{size:.1f} TB"
 
 
-def _check_row_count(rec, rows_imported: int, reporter) -> None:
-    """Compare imported rows to the declared ``FileRows`` (advisory, non-fatal).
+def _check_row_count(rec, imp, reporter) -> bool:
+    """Verify the import is lossless against the *delivered CSV*; returns that verdict.
 
-    FAOSTAT's declared counts occasionally differ slightly from the delivered CSV,
-    so a mismatch is a *warning*, not a failure — unless the whole file imported
-    empty against a non-zero declared count, which likely signals a real problem.
+    The authoritative reference is ``imp.source_row_count`` — the record count of
+    the CSV FAOSTAT actually shipped, counted independently of DuckDB. If DuckDB
+    loaded exactly that many rows the import is lossless, *even when* it disagrees
+    with the declared ``FileRows``: that metadata is approximate and FAOSTAT does
+    not keep it byte-accurate against the bulk file (e.g. MK ships ~2k more rows
+    than it declares).
+
+    A mismatch against the source CSV is a genuine problem — rows dropped or a
+    record split — and is surfaced as an ``invalid`` event so the caller can fail
+    the build under ``--strict``. A disagreement with only the metadata is reported
+    as a plainly-labelled note so it can't be mistaken for data loss.
     """
-    declared = rec.file_rows
-    if declared is None:
-        return
-    if rows_imported == 0 and declared > 0:
+    if not imp.lossless:
         reporter.event(
             rec.code, "import", "invalid",
-            message=f"imported 0 rows but metadata declares {declared:,}",
+            message=(
+                f"row-count mismatch vs source CSV: imported {imp.row_count:,} "
+                f"but the delivered file holds {imp.source_row_count:,} records "
+                f"(counted by {imp.count_method})"
+            ),
         )
-    elif abs(rows_imported - declared) > max(1, int(declared * 0.001)):
+        return False
+
+    declared = rec.file_rows
+    if declared is not None and declared != imp.row_count:
+        diff = imp.row_count - declared
         reporter.log(
-            f"note: {rec.code} imported {rows_imported:,} rows vs declared {declared:,}"
+            f"note: {rec.code} imported all {imp.row_count:,} records present in the "
+            f"source CSV; FAOSTAT's declared FileRows is {declared:,} "
+            f"({diff:+,} — approximate metadata, not data loss)"
         )
+    return True
 
 
 def _record_dataset(
-    con, rec, snapshot, archive, archive_sha256, status, downloaded_at, rows_imported
+    con, rec, snapshot, archive, archive_sha256, status, downloaded_at,
+    rows_imported, source_csv_rows=None,
 ) -> None:
-    """Insert/replace one dataset's provenance row in ``faostat_dataset``."""
+    """Insert/replace one dataset's provenance row in ``faostat_dataset``.
+
+    ``source_csv_rows`` is the record count of the delivered CSV (independent of
+    DuckDB); persisting it alongside ``rows_imported`` and the approximate
+    ``file_rows_declared`` makes losslessness auditable straight from the DB.
+    """
     size = (
         archive.stat().st_size
         if archive.exists()
@@ -902,7 +939,7 @@ def _record_dataset(
     )
     con.execute(
         "INSERT OR REPLACE INTO faostat_dataset VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             rec.code,
             rec.dataset_name,
@@ -917,6 +954,7 @@ def _record_dataset(
             size,
             rec.file_rows,
             rows_imported,
+            source_csv_rows,
             downloaded_at,
             snapshot.url,
             snapshot.sha256,
@@ -1006,6 +1044,9 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
     if args.keep_raw_tables:
         build = replace(build, keep_raw_tables=True)
 
+    # Enrichment is on by default (see EnrichmentConfig); the --enrich-* flags are
+    # kept for explicitness while the --no-enrich-* flags opt back out. When both a
+    # flag and its negation are given, the negation wins (applied last).
     enrichment = cfg.enrichment
     if args.enrich_areas:
         enrichment = replace(enrichment, area_classification=True)
@@ -1015,6 +1056,10 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
         enrichment = replace(
             enrichment, area_classification=True, historical_validity=True
         )
+    if args.no_enrich_areas:
+        enrichment = replace(enrichment, area_classification=False)
+    if args.no_enrich_history:
+        enrichment = replace(enrichment, historical_validity=False)
 
     datasets = cfg.datasets
     if args.include is not None:

@@ -24,8 +24,9 @@ A FAOSTATdb database is organized around three kinds of objects:
    so you can query without writing joins.
 
 Around those sit the **provenance tables** (`faostat_dataset`, `faostat_build`,
-`faostat_column_mapping`, `faostat_constant_column`) and an optional, clearly
-non-source **enrichment** table (`area_classification`).
+`faostat_column_mapping`, `faostat_constant_column`) and a clearly non-source
+**enrichment** table (`area_classification`), built by default (disable with
+`--no-enrich-areas`).
 
 ## Entity–relationship diagram
 
@@ -42,7 +43,7 @@ erDiagram
     data_CODE }o--|| dim_year : "dataset_code, year_code"
     data_CODE }o--|| dim_flag : "dataset_code, flag_code"
     data_CODE ||--|| view_CODE_labelled : "labels joined back"
-    dim_area ||--o| area_classification : "optional enrichment (area_code)"
+    dim_area ||--o| area_classification : "enrichment, on by default (area_code)"
 
     faostat_dataset {
         VARCHAR dataset_code PK
@@ -50,6 +51,7 @@ erDiagram
         VARCHAR date_update
         BIGINT  file_rows_declared
         BIGINT  rows_imported
+        BIGINT  source_csv_rows
         VARCHAR archive_sha256
         VARCHAR import_status
     }
@@ -141,14 +143,15 @@ erDiagram
   raw→normalized column renames, and any column that was constant across a whole
   dataset (dropped from the fact table, its single value recorded here). Both are
   keyed by `dataset_code`.
-- **`area_classification`.** *Optional* (`--enrich-areas`) and **not** source
-  FAOSTAT data — it is a heuristic (note the `confidence` and
+- **`area_classification`.** Built **by default** (disable with `--no-enrich-areas`)
+  and **not** source FAOSTAT data — it is a heuristic (note the `confidence` and
   `classification_source` columns), kept in its own table so it is never confused
-  with what FAOSTAT published. With `--enrich-history` the `valid_from`/`valid_to`
-  columns are filled for the well-known former/successor areas (USSR,
-  Sudan (former) → South Sudan, …) from a small curated gazetteer — those rows are
-  stamped `confidence = 'high'`; areas absent from the gazetteer keep the heuristic
-  `low` classification and NULL validity (we never guess a date we don't have).
+  with what FAOSTAT published. The `valid_from`/`valid_to` columns are filled
+  (disable with `--no-enrich-history`) for the well-known former/successor areas
+  (USSR, Sudan (former) → South Sudan, …) from a small curated gazetteer — those
+  rows are stamped `confidence = 'high'`; areas absent from the gazetteer keep the
+  heuristic `low` classification and NULL validity (we never guess a date we don't
+  have).
 
 ## Rendering this document
 

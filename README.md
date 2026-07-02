@@ -77,7 +77,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
                 [--jobs N] [--keep-archives | --no-keep-archives] \
                 [--download-dir DIR] [--yes] [--strict] \
                 [--no-compact] [--keep-raw-tables] \
-                [--enrich-areas] [--enrich-history] \
+                [--no-enrich-areas] [--no-enrich-history] \
                 [--json] [--ascii] [--no-progress]
 ```
 
@@ -93,8 +93,8 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 | `--strict` | Abort the whole build on the first error. Without it, failed datasets are recorded + skipped and the rest continue. |
 | `--no-compact` | Skip the final compaction pass (faster, but a larger file — see [Making the database small](#making-the-database-as-small-as-possible)). |
 | `--keep-raw-tables` | Also keep an untouched `raw_<code>` copy of each import (debugging losslessness). |
-| `--enrich-areas` | Add the optional, clearly-labelled `area_classification` table (country vs. aggregate). Off by default; not source FAOSTAT content. |
-| `--enrich-history` | Fill `valid_from`/`valid_to` on `area_classification` for well-known former/successor areas (USSR, Sudan (former) → South Sudan, …) from a small curated gazetteer. Implies `--enrich-areas`. Off by default. |
+| `--enrich-areas` / `--no-enrich-areas` | Build (default) / skip the clearly-labelled `area_classification` table (country vs. aggregate). **On by default**; still not source FAOSTAT content (carries `confidence` + `classification_source`). |
+| `--enrich-history` / `--no-enrich-history` | Fill (default) / skip `valid_from`/`valid_to` on `area_classification` for well-known former/successor areas (USSR, Sudan (former) → South Sudan, …) from a small curated gazetteer. Implies `--enrich-areas`. **On by default**. |
 | `--json` | Emit machine-readable JSON-lines progress on **stdout** (human logs stay on stderr). Great for CI. |
 | `--ascii` | Use ASCII status icons (`[OK]`/`[X]`) instead of Unicode (`✓`/`✗`). |
 | `--no-progress` | Suppress animated progress bars (per-dataset event lines still print). |
@@ -217,8 +217,9 @@ is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as the installed
 7. **Import** (sequential) — `importer.import_archive()`: `read_csv` →
    `data_<code>` → dimension extraction → constant-column removal → flag legend →
    column mapping → labelled view.
-8. **Enrich** (optional) — `enrich.enrich_areas()` if `--enrich-areas`, then
-   `enrich.enrich_history()` if `--enrich-history` (fills `valid_from`/`valid_to`).
+8. **Enrich** (on by default) — `enrich.enrich_areas()` unless `--no-enrich-areas`,
+   then `enrich.enrich_history()` unless `--no-enrich-history` (fills
+   `valid_from`/`valid_to`).
 9. **Record** — provenance rows in `faostat_dataset` / `faostat_build`.
 10. **Compact** — `compact.compact_database()` rewrites the file to its smallest form.
 
@@ -340,7 +341,7 @@ single small dataset.) Disable with `--no-compact` if you prefer speed.
 
 | Table | One row per | Key columns |
 | --- | --- | --- |
-| `faostat_dataset` | imported dataset | `dataset_code`, `dataset_name`, `topic`, `dataset_description`, `contact`, `email`, `date_update`, `compression_format`, `file_type`, `file_location`, `file_size_raw`, `file_rows_declared`, `rows_imported`, `downloaded_at`, `source_metadata_url`, `source_metadata_hash`, `source_metadata_json`, `archive_sha256`, `import_status` |
+| `faostat_dataset` | imported dataset | `dataset_code`, `dataset_name`, `topic`, `dataset_description`, `contact`, `email`, `date_update`, `compression_format`, `file_type`, `file_location`, `file_size_raw`, `file_rows_declared`, `rows_imported`, `source_csv_rows`, `downloaded_at`, `source_metadata_url`, `source_metadata_hash`, `source_metadata_json`, `archive_sha256`, `import_status` |
 | `faostat_build` | build run | `build_id`, `started_at`, `completed_at`, `faostatdb_version`, `duckdb_version`, `python_version`, `os`, `metadata_snapshot_sha256`, `command_line`, `config_sha256`, `datasets_imported`, `datasets_failed` |
 | `faostat_column_mapping` | renamed column | `dataset_code`, `table_name`, `original_column_name`, `normalized_column_name`, `inferred_role` |
 | `faostat_constant_column` | dropped constant column | `dataset_code`, `table_name`, `column_name`, `value` |
@@ -372,7 +373,7 @@ erDiagram
     data_CODE }o--|| dim_year : "dataset_code, year_code"
     data_CODE }o--|| dim_flag : "dataset_code, flag_code"
     data_CODE ||--|| view_CODE_labelled : "labels joined back"
-    dim_area ||--o| area_classification : "optional enrichment (area_code)"
+    dim_area ||--o| area_classification : "enrichment, on by default (area_code)"
 
     faostat_dataset {
         VARCHAR dataset_code PK
@@ -380,6 +381,7 @@ erDiagram
         VARCHAR date_update
         BIGINT  file_rows_declared
         BIGINT  rows_imported
+        BIGINT  source_csv_rows
         VARCHAR archive_sha256
         VARCHAR import_status
     }
@@ -462,12 +464,13 @@ erDiagram
 - **`dim_flag`** — labels flag codes; joined into the labelled view too.
 - **`faostat_column_mapping` / `faostat_constant_column`** — audit trails: what was
   renamed, and which constant columns were lifted out (with their value).
-- **`area_classification`** — *optional* (`--enrich-areas`), and explicitly **not**
-  source FAOSTAT content (it carries a `confidence` and a `classification_source`).
-  With `--enrich-history` its `valid_from`/`valid_to` are filled for the well-known
-  former/successor areas (USSR, Sudan (former) → South Sudan, …) from a small curated
-  gazetteer — those rows are marked `confidence = 'high'`; everything else keeps the
-  heuristic `low` classification and NULL validity. We never guess a date we don't have.
+- **`area_classification`** — built **by default** (disable with `--no-enrich-areas`),
+  and explicitly **not** source FAOSTAT content (it carries a `confidence` and a
+  `classification_source`). Its `valid_from`/`valid_to` are filled (disable with
+  `--no-enrich-history`) for the well-known former/successor areas (USSR, Sudan
+  (former) → South Sudan, …) from a small curated gazetteer — those rows are marked
+  `confidence = 'high'`; everything else keeps the heuristic `low` classification and
+  NULL validity. We never guess a date we don't have.
 
 ---
 
@@ -706,8 +709,8 @@ import_threads = 0      # DuckDB import threads; 0 = DuckDB default
 memory_limit = ""       # e.g. "8GB"; "" = DuckDB default
 
 [enrichment]
-area_classification = false   # optional, non-source area country/region flags
-historical_validity = false   # fill valid_from/valid_to for former areas (implies area_classification)
+area_classification = true    # non-source area country/region flags (false / --no-enrich-areas to skip)
+historical_validity = true    # fill valid_from/valid_to for former areas (implies area_classification; false / --no-enrich-history to skip)
 ```
 
 ### Overriding via `secrets.env`
@@ -729,7 +732,8 @@ FAOSTATDB_DATASETS_INCLUDE=QCL,FBS         # comma-separated
 FAOSTATDB_DATASETS_EXCLUDE=FA,CBH          # comma-separated
 FAOSTATDB_IMPORT_THREADS=0
 FAOSTATDB_MEMORY_LIMIT=8GB
-FAOSTATDB_ENRICH_AREAS=false
+FAOSTATDB_ENRICH_AREAS=true                # false to skip the area classification
+FAOSTATDB_ENRICH_HISTORY=true              # false to skip the historical-validity fill
 ```
 
 Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; lists are comma-separated. Run
@@ -741,10 +745,26 @@ Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; lists are comma-separated. Ru
 
 Each build records — in `faostat_dataset` and `faostat_build` — the metadata-JSON
 snapshot hash (and the full raw metadata per dataset), per-archive SHA256, download
-timestamps, declared vs. imported row counts, the command line, a hash of the
+timestamps, row counts, the command line, a hash of the
 effective config, and the tool / DuckDB / Python versions and OS. `faostatdb info`
 prints the headline of all this, so you can answer *"exactly which FAOSTAT snapshot
 is this database based on?"* — valuable for citing or auditing.
+
+Three row counts sit side by side: `file_rows_declared` (FAOSTAT's `FileRows`
+metadata — *approximate*, and not always equal to the file it ships),
+`source_csv_rows` (the records actually present in the delivered CSV, counted
+independently of DuckDB), and `rows_imported` (what landed in the fact table).
+The import is lossless exactly when `rows_imported = source_csv_rows`; a build
+verifies this per dataset and warns loudly (and fails under `--strict`) on any
+mismatch, so a disagreement with the *declared* count is never mistaken for data
+loss:
+
+```sql
+-- Prove every dataset imported completely, regardless of the metadata's estimate:
+SELECT dataset_code, file_rows_declared, source_csv_rows, rows_imported
+FROM faostat_dataset
+WHERE rows_imported <> source_csv_rows;   -- expect zero rows
+```
 
 ---
 
