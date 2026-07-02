@@ -40,7 +40,7 @@ erDiagram
     data_CODE }o--|| dim_area : "dataset_code, area_code"
     data_CODE }o--|| dim_item : "dataset_code, item_code"
     data_CODE }o--|| dim_element : "dataset_code, element_code"
-    data_CODE }o--|| dim_year : "dataset_code, year_code"
+    data_CODE }o--|| dim_year : "dataset_code, year"
     data_CODE }o--|| dim_flag : "dataset_code, flag_code"
     data_CODE ||--|| view_CODE_labelled : "labels joined back"
     dim_area ||--o| area_classification : "enrichment, on by default (area_code)"
@@ -65,7 +65,7 @@ erDiagram
         VARCHAR area_code FK
         VARCHAR item_code FK
         VARCHAR element_code FK
-        VARCHAR year_code FK
+        VARCHAR year FK
         VARCHAR unit
         VARCHAR value
         VARCHAR flag_code FK
@@ -88,8 +88,8 @@ erDiagram
     }
     dim_year {
         VARCHAR dataset_code PK
-        VARCHAR year_code PK
-        VARCHAR year
+        VARCHAR year PK
+        VARCHAR year_code
     }
     dim_flag {
         VARCHAR dataset_code PK
@@ -110,12 +110,8 @@ erDiagram
         VARCHAR area_code PK
         VARCHAR area_label
         BOOLEAN is_country
-        BOOLEAN is_region
-        BOOLEAN is_aggregate
-        VARCHAR classification_source
         VARCHAR valid_from
         VARCHAR valid_to
-        VARCHAR confidence
     }
 ```
 
@@ -144,14 +140,17 @@ erDiagram
   dataset (dropped from the fact table, its single value recorded here). Both are
   keyed by `dataset_code`.
 - **`area_classification`.** Built **by default** (disable with `--no-enrich-areas`)
-  and **not** source FAOSTAT data — it is a heuristic (note the `confidence` and
-  `classification_source` columns), kept in its own table so it is never confused
-  with what FAOSTAT published. The `valid_from`/`valid_to` columns are filled
-  (disable with `--no-enrich-history`) for the well-known former/successor areas
-  (USSR, Sudan (former) → South Sudan, …) from a small curated gazetteer — those
-  rows are stamped `confidence = 'high'`; areas absent from the gazetteer keep the
-  heuristic `low` classification and NULL validity (we never guess a date we don't
-  have).
+  and **not** source FAOSTAT data, kept in its own table so it is never confused
+  with what FAOSTAT published. Both columns come from one committed, hand-curated
+  file — `faostatdb/area_classification.csv` — matched to `dim_area` by name:
+  `is_country` is `true` for a single country or territory (former single states
+  like the USSR or Sudan (former) included) and `false` for a group of
+  countries/areas (continents, unions, income groups, FAO fishing areas, and
+  rollups such as "China" = mainland+Taiwan+HK+Macao or "Belgium-Luxembourg");
+  `valid_from`/`valid_to` (disable with `--no-enrich-history`) carry documented
+  political transition years (USSR → 1991, South Sudan 2011 →, …) and are NULL
+  otherwise (we never guess a date). Editing the CSV and rebuilding is all it takes
+  to change a classification — see the README for the full contract.
 
 ## Rendering this document
 

@@ -87,12 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--enrich-history",
         action="store_true",
         help="fill valid_from/valid_to for former areas from the curated "
-        "gazetteer (implies --enrich-areas; on by default)",
+        "area_classification.csv (implies --enrich-areas; on by default)",
     )
     p_build.add_argument(
         "--no-enrich-history",
         action="store_true",
-        help="skip filling valid_from/valid_to from the historical gazetteer",
+        help="skip filling valid_from/valid_to from the curated CSV",
     )
     p_build.add_argument("--json", action="store_true", help="emit JSON-lines progress")
     p_build.add_argument("--ascii", action="store_true", help="use ASCII status icons")

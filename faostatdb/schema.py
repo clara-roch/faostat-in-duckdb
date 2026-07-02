@@ -103,10 +103,15 @@ def infer_role(normalized: str) -> str:
 # FAOSTAT fact rows repeat dimension attributes on every line: a single area is
 # carried as ``area_code`` + ``area_code_m49`` + ``area_label`` on millions of
 # rows, an item as ``item_code`` + ``item_code_cpc`` + ``item_label``, a year as
-# ``year_code`` + ``year``. We keep only the ``<stem>_code`` key in the fact
-# table and move the redundant attribute columns into a shared ``dim_<stem>``
-# table (keyed by ``(dataset_code, <stem>_code)``). This removes storage-level
-# duplication without dropping or altering any source information.
+# ``year_code`` + ``year``. We keep only the dimension key in the fact table and
+# move the redundant attribute columns into a shared ``dim_<stem>`` table (keyed
+# by ``(dataset_code, <key>)``). This removes storage-level duplication without
+# dropping or altering any source information.
+#
+# The year dimension is the one exception to keying on the ``<stem>_code`` column:
+# the bare ``year`` is the natural, human-readable key (and the source label when
+# a period spans several years), so we retain ``year`` in the fact table and move
+# ``year_code`` into ``dim_year`` instead.
 
 _CODE_SUFFIX = re.compile(r"^(?P<stem>.+)_code$")
 
@@ -122,12 +127,16 @@ def dimension_groups(norm_cols: list[str]) -> list[tuple[str, str, list[str]]]:
     Returns a list of ``(stem, key_column, attribute_columns)`` tuples, where
     ``attribute_columns`` are the redundant columns to move into ``dim_<stem>``.
 
+    The year dimension is special-cased: the retained key is the bare ``year``
+    (kept in the fact table) and ``year_code`` becomes an attribute moved into
+    ``dim_year`` — the reverse of every other dimension, which keeps the ``_code``.
+
     Examples
     --------
     >>> dimension_groups(
     ...     ["area_code", "area_code_m49", "area_label", "year_code", "year", "value"]
     ... )
-    [('area', 'area_code', ['area_code_m49', 'area_label']), ('year', 'year_code', ['year'])]
+    [('area', 'area_code', ['area_code_m49', 'area_label']), ('year', 'year', ['year_code'])]
     >>> dimension_groups(["flag_code", "value"])
     []
     """
@@ -141,9 +150,12 @@ def dimension_groups(norm_cols: list[str]) -> list[tuple[str, str, list[str]]]:
         members = [
             c for c in cols if c == stem or c == key or c.startswith(f"{stem}_")
         ]
-        others = [c for c in members if c != key]
+        # Year keeps the bare ``year`` in the fact table (see module comment); every
+        # other dimension keeps its ``<stem>_code`` key.
+        retained = stem if stem == "year" and stem in members else key
+        others = [c for c in members if c != retained]
         if others:
-            groups.append((stem, key, others))
+            groups.append((stem, retained, others))
     return groups
 
 
@@ -203,10 +215,14 @@ def create_labelled_view(con, dataset_code: str, fact_table: str) -> str | None:
     alias_i = 0
     for col in fact_cols:
         m = _CODE_SUFFIX.match(col)
-        if not m:
-            continue
-        stem = m.group("stem")
-        dim = dimension_table_for(stem) if stem != "flag" else "dim_flag"
+        if m:
+            stem = m.group("stem")
+            dim = dimension_table_for(stem) if stem != "flag" else "dim_flag"
+        else:
+            # A dimension can also be keyed on a bare (non-``_code``) column: the
+            # year dimension keeps ``year`` in the fact table with ``year_code``
+            # moved into dim_year. Match such a column to ``dim_<col>`` when present.
+            dim = dimension_table_for(col)
         if not table_exists(con, dim):
             continue
         # Pull the dimension's attribute columns (everything except the join keys).
@@ -219,10 +235,13 @@ def create_labelled_view(con, dataset_code: str, fact_table: str) -> str | None:
             continue
         alias = f"d{alias_i}"
         alias_i += 1
+        # Dimension key columns are stored as VARCHAR (shared across datasets that
+        # type the same code differently); the fact key keeps its inferred type, so
+        # cast it to text to match. Within a dataset both sides cast identically.
         joins.append(
             f'LEFT JOIN "{dim}" AS {alias} '
             f"ON {alias}.dataset_code = '{dataset_code}' "
-            f'AND {alias}."{col}" = f."{col}"'
+            f'AND {alias}."{col}" = CAST(f."{col}" AS VARCHAR)'
         )
         for c in dim_cols:
             extra_selects.append(f'{alias}."{c}" AS "{c}"')

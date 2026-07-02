@@ -146,10 +146,11 @@ covered by tests + a real end-to-end smoke build:
 - Hot-restart archive reuse; `keep_archives` (default false) deletes archives only on a
   *successful* build, and can be set true to persist the cache for fast re-runs.
 - **Historical country-validity metadata** (`--enrich-history` / `[enrichment]
-  historical_validity`): a small curated gazetteer fills `valid_from`/`valid_to` on
-  `area_classification` for the well-known dissolved/renamed/newly-formed FAOSTAT areas
-  (USSR, Czechoslovakia, Sudan (former) → South Sudan, …) at `high` confidence; areas
-  not in the gazetteer keep NULL validity (we never guess a date). See `faostatdb/enrich.py`.
+  historical_validity`): the committed `faostatdb/area_classification.csv` fills
+  `valid_from`/`valid_to` on `area_classification` for the well-known dissolved/renamed/
+  newly-formed FAOSTAT areas (USSR, Czechoslovakia, Sudan (former) → South Sudan, …) —
+  documented transition years only; areas without a curated date keep NULL validity (we
+  never guess). See `faostatdb/enrich.py`.
 - **Concurrency benchmarking** (`faostatdb bench --include CODE,… [--jobs-list 1,2,4,8]`):
   re-downloads a small explicit dataset set at each `--jobs` level and reports wall-clock
   time and MB/s so the best concurrency can be chosen empirically. The scheduling/timing

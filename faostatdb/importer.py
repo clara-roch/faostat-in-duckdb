@@ -11,7 +11,8 @@ convenience layers:
 
 * **Dimension extraction** — repeated attribute columns (``area_label``,
   ``item_label``, …) are moved into shared ``dim_<stem>`` tables, leaving only the
-  ``<stem>_code`` key in the fact table.
+  dimension key in the fact table (the ``<stem>_code``, except for year where the
+  bare ``year`` is kept and ``year_code`` is moved into ``dim_year``).
 * **Constant-column removal** — columns that never vary across a dataset are
   dropped and their single value recorded in ``faostat_constant_column``.
 * **Flag descriptions** — the archive's flag sidecar CSV (if present) is loaded
@@ -20,6 +21,14 @@ convenience layers:
 * **Labelled view** — ``view_<code>_labelled`` re-joins the labels for no-SQL use.
 
 Everything above is reversible/auditable, so the mirror stays faithful to source.
+
+The one value-level normalization is stripping the leading *text-marker apostrophe*
+that FAOSTAT prefixes onto the international-code columns (``Area Code (M49)`` →
+``'004``, ``Item Code (CPC)`` → ``'0111``). That apostrophe is a spreadsheet
+artifact that forces leading zeros to survive as text, not part of the code, so we
+remove it (leaving the value ``VARCHAR`` with its zeros intact). See
+:func:`strip_leading_apostrophe` — it only touches columns whose *every* value
+carries the apostrophe, so genuine text is never altered.
 """
 
 from __future__ import annotations
@@ -192,19 +201,41 @@ def read_csv_header(con, csv_path: Path, encoding: str = "utf-8") -> list[str]:
     return [d[0] for d in rel.description]
 
 
+#: Types DuckDB's auto-detector is allowed to pick for a column, in priority
+#: order. Restricting the candidate list to *numeric-or-text* is deliberate: it
+#: keeps genuinely numeric columns typed while guaranteeing that anything else
+#: falls back to ``VARCHAR`` rather than being silently reinterpreted. DuckDB's
+#: default candidates also include ``BOOLEAN`` and the date/time family, which
+#: change the *meaning* of a value — e.g. the FAOSTAT unit ``'t'`` (tonnes) is
+#: read as boolean ``true`` — and that would violate source preservation.
+_AUTO_TYPE_CANDIDATES = "['BIGINT', 'DOUBLE', 'VARCHAR']"
+
+
 def import_csv(
     con, csv_path: Path, dataset_code: str, *, keep_raw: bool = False
 ) -> ImportResult:
     """Create ``data_<code>`` from ``csv_path`` with normalized column names.
 
-    Every column is read as ``VARCHAR`` (``all_varchar=true``). This is the
-    source-preservation choice and, critically, it makes the import robust: DuckDB
-    never tries to coerce a value to a narrower type, so FAOSTAT code/date-like
-    strings (e.g. ``'210400TSUB'``, ``'1685.01.01'``, ``'210091F'``, leading-zero
-    codes) can never trigger a conversion error. Type inference over the full file
-    (``sample_size=-1``) was still fragile — a single unusual token in millions of
-    rows would flip a column to INT64 and abort the whole dataset. Reading text
-    keeps the source values byte-for-byte and downstream queries cast explicitly.
+    Columns keep proper types where the data supports it: DuckDB infers each
+    column's type from a **full-file scan** (``sample_size=-1``) restricted to
+    the numeric-or-text candidates in :data:`_AUTO_TYPE_CANDIDATES`. A column that
+    is integer everywhere becomes ``BIGINT``, an everywhere-decimal one ``DOUBLE``,
+    and anything with mixed or non-numeric content falls back to ``VARCHAR`` — so
+    text is used *only where the data is genuinely not a plain number*.
+
+    Two things make this both correct and robust:
+
+    * **Full-file inference, not a sample.** The original conversion errors
+      (``Could not convert string '210400TSUB'/'1685.01.01' to INT64``) came from
+      DuckDB sampling only the first rows, guessing ``INT64``, then aborting on a
+      later out-of-pattern token. Scanning every row makes it pick a type that
+      fits *all* values, so those code/date-like strings land in ``VARCHAR`` on
+      their own and never raise.
+    * **Numeric-or-text candidates only.** Left to its defaults DuckDB would also
+      guess ``BOOLEAN``/``DATE``/``TIMESTAMP`` and reinterpret values (the unit
+      ``'t'`` → boolean ``true``, dotted "dates", …). Limiting the candidates
+      means a value's storage type is only ever *narrowed*, never redefined —
+      keeping the mirror faithful to source.
 
     After the raw load we record the column mapping, extract dimensions, and drop
     constant columns. When ``keep_raw`` is set, an untouched copy of the fully
@@ -226,7 +257,7 @@ def import_csv(
             f'CREATE TABLE "{table}" AS '
             f"SELECT {projection} "
             f"FROM read_csv(?, header=true, encoding='{encoding}', "
-            f"sample_size=-1, all_varchar=true)",
+            f"sample_size=-1, auto_type_candidates={_AUTO_TYPE_CANDIDATES})",
             [str(csv_path)],
         )
     except Exception as exc:  # noqa: BLE001 — re-raised with import context
@@ -244,10 +275,15 @@ def import_csv(
     source_rows, method = count_source_rows(csv_path, encoding, count)
 
     # Keep an untouched copy *before* any reduction, for debugging losslessness.
+    # (Kept before the apostrophe strip too, so raw_<code> shows the source verbatim.)
     if keep_raw:
         raw_table = raw_table_name_for(dataset_code)
         con.execute(f'DROP TABLE IF EXISTS "{raw_table}"')
         con.execute(f'CREATE TABLE "{raw_table}" AS SELECT * FROM "{table}"')
+
+    # Remove FAOSTAT's leading text-marker apostrophe from the M49/CPC code columns
+    # before dimensions are extracted, so the cleaned code flows into dim_<stem>.
+    strip_leading_apostrophe(con, table)
 
     record_column_mapping(con, dataset_code, table, raw_cols, norm_cols)
     extract_dimensions(con, table, dataset_code, norm_cols)
@@ -266,19 +302,30 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
 
     For every dimension group (e.g. ``area_code`` + ``area_code_m49`` +
     ``area_label``), the attribute columns are deduplicated into a shared
-    ``dim_<stem>`` table keyed by ``(dataset_code, <stem>_code)`` and then dropped
-    from the fact table, which retains only the ``<stem>_code`` key. No values are
-    altered: the dimension table holds the exact source attributes, deduplicated.
-    """
-    col_types = {row[0]: row[1] for row in con.execute(f'DESCRIBE "{table}"').fetchall()}
+    ``dim_<stem>`` table keyed by ``(dataset_code, <key>)`` and then dropped from
+    the fact table, which retains only that key. The key is the ``<stem>_code``
+    for every dimension except year, where the bare ``year`` is retained and
+    ``year_code`` is moved into ``dim_year``. No values are altered: the dimension
+    table holds the exact source attributes, deduplicated.
 
+    Dimension columns are stored as ``VARCHAR`` on purpose. A ``dim_<stem>`` table
+    is *shared* across datasets, but the same logical code is typed differently
+    from one dataset to the next — FAOSTAT writes some ``item_code``/``area_code``
+    columns as plain integers (inferred ``BIGINT``) and others with alphanumeric
+    codes (inferred ``VARCHAR``). Storing every dimension attribute as text keeps
+    the shared table consistent regardless of per-dataset typing and import order;
+    the fact table keeps its own inferred type and the labelled view casts the key
+    to text when it joins. Casting to text never loses information here.
+    """
     for stem, key, others in dimension_groups(norm_cols):
         dim = dimension_table_for(stem)
         members = [key, *others]
-        member_sql = ", ".join(f'"{m}"' for m in members)
+        # Text projection: read the fact column (whatever its inferred type) as the
+        # canonical VARCHAR the shared dimension table stores.
+        member_sql = ", ".join(f'CAST("{m}" AS VARCHAR) AS "{m}"' for m in members)
 
-        # Create the dimension table on first sight, deriving column types from
-        # the fact table. IF NOT EXISTS keeps a table shared across datasets.
+        # Create the dimension table on first sight. IF NOT EXISTS keeps a table
+        # shared across datasets; every attribute column is VARCHAR.
         con.execute(
             f'CREATE TABLE IF NOT EXISTS "{dim}" AS '
             f'SELECT CAST(NULL AS VARCHAR) AS dataset_code, {member_sql} '
@@ -289,7 +336,7 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
         existing = {d[0] for d in con.execute(f'SELECT * FROM "{dim}" LIMIT 0').description}
         for m in members:
             if m not in existing:
-                con.execute(f'ALTER TABLE "{dim}" ADD COLUMN IF NOT EXISTS "{m}" {col_types[m]}')
+                con.execute(f'ALTER TABLE "{dim}" ADD COLUMN IF NOT EXISTS "{m}" VARCHAR')
 
         # Re-import is idempotent: replace this dataset's dimension rows.
         con.execute(f'DELETE FROM "{dim}" WHERE dataset_code = ?', [dataset_code])
@@ -367,6 +414,50 @@ def extract_constant_columns(
             [dataset_code, table, c, value],
         )
         con.execute(f'ALTER TABLE "{table}" DROP COLUMN "{c}"')
+
+
+def strip_leading_apostrophe(con, table: str) -> list[str]:
+    """Strip FAOSTAT's leading text-marker apostrophe from code columns in ``table``.
+
+    FAOSTAT bulk CSVs prefix the international-code columns — ``Area Code (M49)``
+    and ``Item Code (CPC)`` — with a single apostrophe (an Excel text marker that
+    keeps the leading zeros of e.g. M49 ``'004`` or CPC ``'0111`` from being read as
+    a number). The apostrophe is a spreadsheet formatting artifact, not part of the
+    code, so we remove it while keeping the column ``VARCHAR`` (an ``UPDATE`` never
+    changes the column type, so the leading zeros survive as text).
+
+    To stay conservative we only touch a column whose *every* non-null value carries
+    the apostrophe — the signature of a uniform text-marker column. Label columns,
+    where a stray leading quote could be genuine content, are left untouched. Numeric
+    columns (the internal ``area_code`` / ``item_code`` / ``value`` / ``year``) are
+    never candidates because a leading apostrophe would have forced them to ``VARCHAR``
+    at load time. Returns the names of the columns that were stripped.
+    """
+    types = {r[0]: r[1] for r in con.execute(f'DESCRIBE "{table}"').fetchall()}
+    text_cols = [c for c, t in types.items() if t == "VARCHAR"]
+    if not text_cols:
+        return []
+
+    # One scan: per text column, count non-null values and apostrophe-prefixed ones.
+    # (``LIKE '''%'`` matches a leading single quote — the apostrophe is doubled to
+    # escape it inside the SQL string literal.)
+    parts: list[str] = []
+    for c in text_cols:
+        parts.append(f'COUNT("{c}")')
+        parts.append(f"COUNT(*) FILTER (WHERE \"{c}\" LIKE '''%')")
+    stats = con.execute(f'SELECT {", ".join(parts)} FROM "{table}"').fetchone()
+
+    stripped: list[str] = []
+    idx = 0
+    for c in text_cols:
+        non_null, prefixed = stats[idx], stats[idx + 1]
+        idx += 2
+        # Strip only when the apostrophe is present on *every* non-null value, i.e.
+        # it is a column-wide text marker and not incidental content on a few rows.
+        if non_null > 0 and prefixed == non_null:
+            con.execute(f'UPDATE "{table}" SET "{c}" = substr("{c}", 2)')
+            stripped.append(c)
+    return stripped
 
 
 def extract_flag_dimension(

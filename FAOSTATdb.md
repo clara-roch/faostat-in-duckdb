@@ -194,14 +194,22 @@ dim_area
 
 area_classification
 - area_code
+- area_label
 - is_country
-- is_region
-- is_aggregate
-- classification_source
 - valid_from
 - valid_to
-- confidence
 ```
+
+(The initial sketch also listed `is_region`, `is_aggregate`, `classification_source`
+and `confidence`. The implemented classification is a single `is_country` flag —
+`is_aggregate` and `is_region` would merely duplicate `NOT is_country` — read from a
+committed, hand-curated file (`faostatdb/area_classification.csv`, keyed by area name)
+rather than derived by a code/label heuristic. `is_country` is `true` for a single
+country/territory, including former single states (USSR, Sudan (former), …), and
+`false` for a group of countries. Provenance is the CSV itself, so no per-row
+`classification_source`/`confidence` column is stored; `valid_from`/`valid_to` carry
+only well-documented transition years and are NULL otherwise. The honest, non-redundant
+schema is therefore just the five fields above.)
 
 The key point is that **country-existence metadata should be explicitly sourced**. FAOSTAT covers countries, territories, and FAO regional groupings; the public FAOSTAT page describes coverage of over 245 countries and territories and FAO regional groupings from 1961 onward. ([FAOHome][3]) But historical country validity is a delicate issue. Soviet Union, Yugoslavia, Czechoslovakia, Serbia and Montenegro, Sudan/South Sudan, Ethiopia/Eritrea, and China-related codes require careful handling.
 

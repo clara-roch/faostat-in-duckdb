@@ -97,18 +97,19 @@ class PerformanceConfig:
 class EnrichmentConfig:
     """The ``[enrichment]`` section — non-source-derived additions.
 
-    Built by default so a fresh database ships with the country/region
-    classification and historical validity ready to use. The additions are still
-    clearly separated into their own tables and carry a ``confidence`` +
-    ``classification_source`` so they are never confused with source FAOSTAT
-    content (FAOSTATdb.md > Country metadata). Disable with ``--no-enrich-areas``
-    / ``--no-enrich-history`` (or set these to ``false``) for a strictly
-    source-only build.
+    Built by default so a fresh database ships with the country classification and
+    historical validity ready to use. The additions are still clearly separated
+    into their own ``area_classification`` table so they are never confused with
+    source FAOSTAT content (FAOSTATdb.md > Country metadata); both columns come from
+    a committed, hand-curated file (``faostatdb/area_classification.csv``) rather
+    than from FAOSTAT, so the table stores no per-row confidence/source column.
+    Disable with ``--no-enrich-areas`` / ``--no-enrich-history`` (or set these to
+    ``false``) for a strictly source-only build.
     """
 
     area_classification: bool = True
     # Fill valid_from / valid_to in area_classification from the curated
-    # historical gazetteer (implies area_classification). See enrich.enrich_history.
+    # area_classification.csv (implies area_classification). See enrich.enrich_history.
     historical_validity: bool = True
 
 

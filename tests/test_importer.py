@@ -64,6 +64,10 @@ def _cols(con, table):
     return [d[0] for d in con.execute(f'SELECT * FROM "{table}" LIMIT 0').description]
 
 
+def _coltypes(con, table):
+    return {r[0]: r[1] for r in con.execute(f'DESCRIBE "{table}"').fetchall()}
+
+
 def test_import_builds_reduced_fact_table(con, tmp_path):
     archive = _make_archive(tmp_path)
     build_dir = tmp_path / "build"
@@ -100,14 +104,15 @@ def test_dimension_tables_hold_labels(con, tmp_path):
         ).fetchall()
     }
     assert labels == {"Afghanistan", "France"}
-    # M49 alternate code preserved verbatim (leading zero kept as text).
+    # M49 alternate code: the leading text-marker apostrophe is stripped, but the
+    # leading zeros survive as text (still VARCHAR, not coerced to a number).
     m49 = {
         r[0]
         for r in con.execute(
             "SELECT area_code_m49 FROM dim_area WHERE dataset_code = 'QCL'"
         ).fetchall()
     }
-    assert m49 == {"'004", "'250"}
+    assert m49 == {"004", "250"}
 
 
 def test_flag_dimension_from_sidecar(con, tmp_path):
@@ -223,6 +228,144 @@ def test_keep_raw_tables_preserves_untouched_copy(con, tmp_path):
     raw_cols = _cols(con, "raw_qcl")
     assert "area_label" in raw_cols
     assert "domain" in raw_cols
+
+
+def test_numeric_columns_get_real_types(con, tmp_path):
+    # Columns that are numeric on every row are given real numeric types, not text.
+    importer_mod.import_archive(con, _make_archive(tmp_path), "QCL", tmp_path / "b")
+    types = _coltypes(con, "data_qcl")
+    assert types["value"] in ("BIGINT", "DOUBLE")
+    assert types["area_code"] == "BIGINT"
+    assert types["item_code"] == "BIGINT"
+    # The fact table keeps the bare ``year`` (not ``year_code``); numeric years type BIGINT.
+    assert types["year"] == "BIGINT"
+    assert "year_code" not in types
+
+
+def test_mixed_value_column_stays_text_and_preserves_cells(con, tmp_path):
+    # A single non-numeric cell (a FAOSTAT censored threshold like "<0.1") makes the
+    # whole column text so the value is preserved verbatim rather than coerced/dropped.
+    main = MAIN_CSV.replace('"3200"', '"<0.1"', 1)
+    importer_mod.import_archive(con, _make_archive(tmp_path, main=main), "QCL", tmp_path / "b")
+    assert _coltypes(con, "data_qcl")["value"] == "VARCHAR"
+    values = {r[0] for r in con.execute('SELECT value FROM data_qcl').fetchall()}
+    assert "<0.1" in values
+
+
+def test_boolean_like_token_not_coerced_to_boolean(con, tmp_path):
+    # DuckDB's default inference reads the unit "t" (tonnes) as boolean true; we
+    # restrict candidates to numeric-or-text so it stays the literal string "t".
+    # Here every Unit == "t", so it is lifted into faostat_constant_column: its
+    # recorded value must be "t", not "True".
+    main = MAIN_CSV.replace('"ha"', '"t"')
+    importer_mod.import_archive(con, _make_archive(tmp_path, main=main), "QCL", tmp_path / "b")
+    constants = dict(
+        con.execute(
+            "SELECT column_name, value FROM faostat_constant_column "
+            "WHERE dataset_code = 'QCL'"
+        ).fetchall()
+    )
+    assert constants.get("unit") == "t"
+
+
+def test_shared_dimension_survives_heterogeneous_code_types(con, tmp_path):
+    # dim_item is shared across datasets, but one dataset's item_code is all-numeric
+    # (fact column typed BIGINT) while another's is alphanumeric (typed VARCHAR).
+    # The shared, text-typed dimension must accept both — importing the numeric one
+    # first, which would otherwise fix dim_item.item_code to BIGINT and reject 'F1001'.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b2").mkdir()
+    numeric_arch = _make_archive(tmp_path / "a", main=MAIN_CSV)
+    alpha_main = MAIN_CSV.replace('"15"', '"F1001"').replace('"27"', '"210400TSUB"')
+    alpha_arch = _make_archive(tmp_path / "b2", main=alpha_main)
+
+    importer_mod.import_archive(con, numeric_arch, "QCL", tmp_path / "bn")
+    importer_mod.import_archive(con, alpha_arch, "FOP", tmp_path / "bf")
+
+    # Shared dimension keeps codes as text and holds both datasets' codes.
+    assert _coltypes(con, "dim_item")["item_code"] == "VARCHAR"
+    codes = {r[0] for r in con.execute("SELECT item_code FROM dim_item").fetchall()}
+    assert {"15", "27", "F1001", "210400TSUB"} <= codes
+    # Fact tables keep their own inferred types.
+    assert _coltypes(con, "data_qcl")["item_code"] == "BIGINT"
+    assert _coltypes(con, "data_fop")["item_code"] == "VARCHAR"
+    # The labelled view resolves labels across the type boundary (cast join).
+    assert con.execute(
+        "SELECT item_label FROM view_fop_labelled WHERE item_code = '210400TSUB'"
+    ).fetchone() == ("Rice",)
+
+
+def test_fact_keeps_year_and_year_code_moves_to_dim(con, tmp_path):
+    # The fact table exposes the human-readable `year` (not `year_code`); the
+    # source `year_code` is preserved losslessly in dim_year and re-surfaced by
+    # the labelled view. This is the one dimension keyed on the bare stem.
+    importer_mod.import_archive(con, _make_archive(tmp_path), "QCL", tmp_path / "b")
+
+    fact_cols = _cols(con, "data_qcl")
+    assert "year" in fact_cols
+    assert "year_code" not in fact_cols
+
+    # dim_year is keyed on `year` and still carries the source `year_code`.
+    dim_cols = _cols(con, "dim_year")
+    assert {"year", "year_code"} <= set(dim_cols)
+    pairs = set(con.execute("SELECT year, year_code FROM dim_year").fetchall())
+    assert {("2000", "2000"), ("2001", "2001")} <= pairs
+
+    # The labelled view carries both the fact `year` and the joined-back `year_code`.
+    view_cols = _cols(con, "view_qcl_labelled")
+    assert {"year", "year_code"} <= set(view_cols)
+    row = con.execute(
+        "SELECT year, year_code FROM view_qcl_labelled "
+        "WHERE area_label = 'France' AND item_label = 'Wheat' "
+        "AND element_label = 'Production' AND year = 2001"
+    ).fetchone()
+    assert row == (2001, "2001")
+
+
+def test_leading_apostrophe_stripped_but_leading_zeros_kept(con, tmp_path):
+    # FAOSTAT prefixes the M49 code with a text-marker apostrophe ('004). It is a
+    # spreadsheet artifact, not part of the code, so it is stripped — while the
+    # value stays VARCHAR so the leading zero is not lost to a numeric cast.
+    importer_mod.import_archive(con, _make_archive(tmp_path), "QCL", tmp_path / "b")
+
+    assert _coltypes(con, "dim_area")["area_code_m49"] == "VARCHAR"
+    m49 = {
+        r[0]
+        for r in con.execute(
+            "SELECT area_code_m49 FROM dim_area WHERE dataset_code = 'QCL'"
+        ).fetchall()
+    }
+    assert m49 == {"004", "250"}  # apostrophe gone, leading zero preserved
+    # No value anywhere in the labelled view still carries the marker.
+    assert con.execute(
+        "SELECT COUNT(*) FROM view_qcl_labelled WHERE area_code_m49 LIKE '''%'"
+    ).fetchone() == (0,)
+
+
+def test_strip_leading_apostrophe_only_touches_uniform_columns():
+    # Unit-level: a column is stripped only when EVERY non-null value carries the
+    # apostrophe (a column-wide text marker). A column where only some rows start
+    # with a quote is left untouched, so genuine content is never altered.
+    c = duckdb.connect()
+    try:
+        c.execute(
+            "CREATE TABLE t AS SELECT * FROM (VALUES "
+            "('''004', '''all', 'some'), "
+            "('''250', '''all', '''one'), "
+            "(NULL,     '''all', 'plain')) AS v(marker, uniform, mixed)"
+        )
+        stripped = importer_mod.strip_leading_apostrophe(c, "t")
+        assert set(stripped) == {"marker", "uniform"}  # 'mixed' is not uniform
+
+        rows = c.execute("SELECT marker, uniform, mixed FROM t ORDER BY uniform, marker").fetchall()
+        # marker/uniform lose the leading quote (NULL is left as NULL); mixed is verbatim.
+        assert rows == [
+            ("004", "all", "some"),
+            ("250", "all", "'one"),
+            (None, "all", "plain"),
+        ]
+    finally:
+        c.close()
 
 
 def _extract_main(con, tmp_path):

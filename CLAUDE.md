@@ -34,13 +34,18 @@ Do not re-litigate these without reason — they are settled in `FAOSTATdb.md`:
   interrupted/failed run — they are never deleted before the build succeeds. Set
   `keep_archives = true` to persist the cache across successful builds.
 - **Enrichment is on by default and clearly non-source** (`faostatdb/enrich.py`, v0.3 — implemented).
-  It builds a heuristic `area_classification` (country/region/aggregate, `confidence='low'`)
-  and fills `valid_from`/`valid_to` from a small curated gazetteer of well-known
-  former/successor FAOSTAT areas (`confidence='high'`). Disable per-run with
-  `--no-enrich-areas` / `--no-enrich-history` (history implies areas), or via `[enrichment]`
-  in config. Enrichment stays in its own tables with an explicit `confidence` +
-  `classification_source`: never let it leak into the source tables, and never guess a
-  validity date not in the gazetteer.
+  It builds `area_classification` from a committed, hand-curated file
+  (`faostatdb/area_classification.csv`, columns `area_name, is_country, valid_from, valid_to`),
+  matched to `dim_area` by name — NOT from FAOSTAT and NOT from a code/label heuristic.
+  `is_country` is `true` for a single country/territory (former single states like the USSR or
+  Sudan (former) included) and `false` for a group of countries (continents, unions, income
+  groups, FAO fishing areas, and rollups like "China" = mainland+Taiwan+HK+Macao or
+  "Belgium-Luxembourg"). `valid_from`/`valid_to` hold documented political transition years only.
+  Disable per-run with `--no-enrich-areas` / `--no-enrich-history` (history implies areas), or via
+  `[enrichment]` in config. Enrichment stays in its own table: never let it leak into the source
+  tables, never guess a validity date, and **edit the CSV, not the code, to change a
+  classification**. The table stores no per-row `confidence` / `classification_source` column and
+  no `is_aggregate` (just `NOT is_country`) — don't reintroduce them; they'd be redundant.
 - **Concurrency is benchmarked, not guessed** (`faostatdb bench`, `faostatdb/bench.py`, v0.3).
   The one concurrency knob is `build.jobs` (parallel downloads); `bench` measures throughput
   at several `--jobs` levels. Its scheduling/timing core is network-free and unit-tested;
