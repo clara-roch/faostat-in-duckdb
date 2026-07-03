@@ -2,6 +2,16 @@
 
 Internal documentation: module roles, the build pipeline, and the data-model decisions behind the importer. See [README.md](README.md) for installation, usage, and querying.
 
+## Local development setup
+
+From a local checkout, install FAOSTATdb in editable mode:
+
+```bash
+python -m pip install -e ".[ui,dev]"
+```
+
+That gives you the `faostatdb` command, the optional UI dependencies (`rich`, `platformdirs`), and the test dependency (`pytest`). If you do not want the optional UI extras, use `python -m pip install -e ".[dev]"` instead.
+
 ## The build pipeline
 
 Everything starts at the CLI and flows through the modules below. The entry point is [`faostatdb/cli.py`](faostatdb/cli.py) (`main`), reachable as the installed `faostatdb` command or `python -m faostatdb` ([`faostatdb/__main__.py`](faostatdb/__main__.py)).

@@ -10,13 +10,21 @@ FAOSTATdb downloads FAOSTAT bulk ZIP archives, validates them, and imports each 
 
 ## Install
 
+Choose one of these installation methods:
+
+### With `python -m pip`
+
 ```bash
-pip install -e ".[ui]"      # ui extra adds rich progress + platformdirs cache dirs
-# or run without installing:
-python -m faostatdb --help
+python -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
 ```
 
-Required dependency: `duckdb`. Optional: `rich` (nicer progress), `platformdirs` (OS-appropriate cache dirs). Everything else is Python standard library (`zipfile`, `tomllib`, `urllib`, `zipapp`).
+### With `pipx`
+
+```bash
+pipx install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
+```
+
+You do not need to install `duckdb` yourself. The optional `[ui]` extra only adds nicer progress output and better cache-directory defaults.
 
 ## Quick start
 
