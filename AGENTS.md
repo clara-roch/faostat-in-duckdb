@@ -1,0 +1,1 @@
+/Users/cgouel/Documents/git_projects/code/faostat-in-duckdb/CLAUDE.md
