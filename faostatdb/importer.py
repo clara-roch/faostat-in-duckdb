@@ -208,7 +208,16 @@ def read_csv_header(con, csv_path: Path, encoding: str = "utf-8") -> list[str]:
 #: default candidates also include ``BOOLEAN`` and the date/time family, which
 #: change the *meaning* of a value — e.g. the FAOSTAT unit ``'t'`` (tonnes) is
 #: read as boolean ``true`` — and that would violate source preservation.
-_AUTO_TYPE_CANDIDATES = "['BIGINT', 'DOUBLE', 'VARCHAR']"
+#:
+#: ``INTEGER`` (INT32) precedes ``BIGINT`` so the sniffer picks the *narrowest*
+#: integer type that holds every value: FAOSTAT dimension codes and years are
+#: small integers, so storing them in 4 bytes instead of 8 is a sizable saving
+#: across the fact rows. ``BIGINT`` stays in the list purely as an overflow guard
+#: — a column with an all-integer value above the INT32 ceiling (~2.1e9) keeps an
+#: exact 64-bit type instead of falling through to lossy ``DOUBLE`` (exact only
+#: below 2**53). No fact/dim column in the current inventory needs it, but it
+#: costs nothing and protects source fidelity if one ever does.
+_AUTO_TYPE_CANDIDATES = "['INTEGER', 'BIGINT', 'DOUBLE', 'VARCHAR']"
 
 
 def import_csv(
@@ -219,9 +228,10 @@ def import_csv(
     Columns keep proper types where the data supports it: DuckDB infers each
     column's type from a **full-file scan** (``sample_size=-1``) restricted to
     the numeric-or-text candidates in :data:`_AUTO_TYPE_CANDIDATES`. A column that
-    is integer everywhere becomes ``BIGINT``, an everywhere-decimal one ``DOUBLE``,
-    and anything with mixed or non-numeric content falls back to ``VARCHAR`` — so
-    text is used *only where the data is genuinely not a plain number*.
+    is integer everywhere becomes ``INTEGER`` (or ``BIGINT`` if any value exceeds
+    the INT32 range), an everywhere-decimal one ``DOUBLE``, and anything with mixed
+    or non-numeric content falls back to ``VARCHAR`` — so text is used *only where
+    the data is genuinely not a plain number*.
 
     Two things make this both correct and robust:
 
@@ -311,7 +321,7 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
     Dimension columns are stored as ``VARCHAR`` on purpose. A ``dim_<stem>`` table
     is *shared* across datasets, but the same logical code is typed differently
     from one dataset to the next — FAOSTAT writes some ``item_code``/``area_code``
-    columns as plain integers (inferred ``BIGINT``) and others with alphanumeric
+    columns as plain integers (inferred ``INTEGER``) and others with alphanumeric
     codes (inferred ``VARCHAR``). Storing every dimension attribute as text keeps
     the shared table consistent regardless of per-dataset typing and import order;
     the fact table keeps its own inferred type and the labelled view casts the key

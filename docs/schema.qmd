@@ -62,12 +62,12 @@ erDiagram
         VARCHAR duckdb_version
     }
     data_CODE {
-        VARCHAR area_code FK
+        INTEGER area_code FK
         VARCHAR item_code FK
-        VARCHAR element_code FK
-        VARCHAR year FK
+        INTEGER element_code FK
+        INTEGER year FK
         VARCHAR unit
-        VARCHAR value
+        DOUBLE  value
         VARCHAR flag_code FK
     }
     dim_area {

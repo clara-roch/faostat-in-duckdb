@@ -237,8 +237,8 @@ FAOSTAT prefixes its international-code columns — `Area Code (M49)` and `Item 
 
 ### Types and encoding
 
-- **Column types are inferred per column — text only where the data isn't purely numeric.** Each column's type is detected from a **full-file scan** (DuckDB `sample_size=-1`), so a column that is an integer on every row becomes `BIGINT`, an everywhere-decimal one `DOUBLE`, and anything with mixed or non-numeric content falls back to `VARCHAR`. That is why `value` is a real `DOUBLE` in most datasets but stays text in a few — e.g. Food Security keeps censored thresholds like `<0.1` verbatim — and why alphanumeric code columns (`item_code` values such as `210400TSUB`, or `Area Code (M49)` values whose leading zeros must survive) land in `VARCHAR` on their own. The earlier "conversion" failures (`Could not convert '210400TSUB' to INT64`) came from DuckDB guessing a type off the first few rows and then aborting; scanning the whole file picks a type that fits every value, so those errors can't recur.
-- **Inference is restricted to numeric-or-text so a value's meaning is never reinterpreted.** DuckDB is allowed to choose only `BIGINT`, `DOUBLE`, or `VARCHAR` (`auto_type_candidates`). Its default candidates also include `BOOLEAN` and the date/time family, which silently *redefine* values — the FAOSTAT unit `t` (tonnes) would be read as boolean `true`, dotted strings as dates. Constraining the candidates means a column's storage type is only ever *narrowed* to a number when it truly is one, never redefined — keeping the mirror faithful to source.
+- **Column types are inferred per column — text only where the data isn't purely numeric.** Each column's type is detected from a **full-file scan** (DuckDB `sample_size=-1`), so a column that is an integer on every row becomes `INTEGER` (or `BIGINT` if some value overflows the INT32 range), an everywhere-decimal one `DOUBLE`, and anything with mixed or non-numeric content falls back to `VARCHAR`. That is why `value` is a real `DOUBLE` in most datasets but stays text in a few — e.g. Food Security keeps censored thresholds like `<0.1` verbatim — and why alphanumeric code columns (`item_code` values such as `210400TSUB`, or `Area Code (M49)` values whose leading zeros must survive) land in `VARCHAR` on their own. The earlier "conversion" failures (`Could not convert '210400TSUB' to INT64`) came from DuckDB guessing a type off the first few rows and then aborting; scanning the whole file picks a type that fits every value, so those errors can't recur.
+- **Inference is restricted to numeric-or-text so a value's meaning is never reinterpreted.** DuckDB is allowed to choose only `INTEGER`, `BIGINT`, `DOUBLE`, or `VARCHAR` (`auto_type_candidates`), tried narrowest-first: small dimension codes and years land in 4-byte `INTEGER`, and `BIGINT` is kept only as an overflow guard so a genuinely huge integer stays exact rather than degrading to `DOUBLE`. Its default candidates also include `BOOLEAN` and the date/time family, which silently *redefine* values — the FAOSTAT unit `t` (tonnes) would be read as boolean `true`, dotted strings as dates. Constraining the candidates means a column's storage type is only ever *narrowed* to a number when it truly is one, never redefined — keeping the mirror faithful to source.
 - **Dimension tables (`dim_<stem>`) store codes as `VARCHAR`.** They are shared across datasets, and FAOSTAT types the same logical code numerically in one dataset and alphanumerically in another; keeping dimension keys as text makes the shared table consistent regardless of how a given dataset's fact column was typed. The fact table keeps its own inferred type; the labelled view casts the key to text when it joins.
 - **Encoding is detected per archive.** Most files are UTF-8; some carry a UTF-16 BOM, others are Latin-1 (e.g. an unescaped `ô` in "Côte d'Ivoire"). FAOSTATdb checks for a BOM, validates as UTF-8, and falls back to Latin-1 only when needed.
 - **Errors name the dataset, file, encoding, and columns.** If a read still fails, the message carries the dataset code, the CSV file name, the detected encoding, and the full raw→normalized column list, so it's clear which dataset (and column) is at fault rather than a bare DuckDB stack trace.
@@ -300,10 +300,10 @@ erDiagram
         VARCHAR duckdb_version
     }
     data_CODE {
-        BIGINT  area_code FK
+        INTEGER area_code FK
         VARCHAR item_code FK
-        BIGINT  element_code FK
-        BIGINT  year FK
+        INTEGER element_code FK
+        INTEGER year FK
         VARCHAR unit
         DOUBLE  value
         VARCHAR flag_code FK

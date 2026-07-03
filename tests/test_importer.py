@@ -251,11 +251,12 @@ def test_numeric_columns_get_real_types(con, tmp_path):
     # Columns that are numeric on every row are given real numeric types, not text.
     importer_mod.import_archive(con, _make_archive(tmp_path), "QCL", tmp_path / "b")
     types = _coltypes(con, "data_qcl")
-    assert types["value"] in ("BIGINT", "DOUBLE")
-    assert types["area_code"] == "BIGINT"
-    assert types["item_code"] == "BIGINT"
-    # The fact table keeps the bare ``year`` (not ``year_code``); numeric years type BIGINT.
-    assert types["year"] == "BIGINT"
+    # Small integers infer INT32; the value column is all-integer here so it does too.
+    assert types["value"] in ("INTEGER", "BIGINT", "DOUBLE")
+    assert types["area_code"] == "INTEGER"
+    assert types["item_code"] == "INTEGER"
+    # The fact table keeps the bare ``year`` (not ``year_code``); numeric years type INTEGER.
+    assert types["year"] == "INTEGER"
     assert "year_code" not in types
 
 
@@ -287,9 +288,9 @@ def test_boolean_like_token_not_coerced_to_boolean(con, tmp_path):
 
 def test_shared_dimension_survives_heterogeneous_code_types(con, tmp_path):
     # dim_item is shared across datasets, but one dataset's item_code is all-numeric
-    # (fact column typed BIGINT) while another's is alphanumeric (typed VARCHAR).
+    # (fact column typed INTEGER) while another's is alphanumeric (typed VARCHAR).
     # The shared, text-typed dimension must accept both — importing the numeric one
-    # first, which would otherwise fix dim_item.item_code to BIGINT and reject 'F1001'.
+    # first, which would otherwise fix dim_item.item_code to INTEGER and reject 'F1001'.
     (tmp_path / "a").mkdir()
     (tmp_path / "b2").mkdir()
     numeric_arch = _make_archive(tmp_path / "a", main=MAIN_CSV)
@@ -304,7 +305,7 @@ def test_shared_dimension_survives_heterogeneous_code_types(con, tmp_path):
     codes = {r[0] for r in con.execute("SELECT item_code FROM dim_item").fetchall()}
     assert {"15", "27", "F1001", "210400TSUB"} <= codes
     # Fact tables keep their own inferred types.
-    assert _coltypes(con, "data_qcl")["item_code"] == "BIGINT"
+    assert _coltypes(con, "data_qcl")["item_code"] == "INTEGER"
     assert _coltypes(con, "data_fop")["item_code"] == "VARCHAR"
     # The labelled view resolves labels across the type boundary (cast join).
     assert con.execute(
