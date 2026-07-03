@@ -69,6 +69,23 @@ def test_area_classification_schema_is_minimal(con):
     assert cols == {"area_code", "area_label", "is_country", "valid_from", "valid_to"}
 
 
+def test_area_classification_uses_integer_codes_and_years(con):
+    # This is package-derived, not source, so the FAO area_code and the transition
+    # years are stored as INTEGER (not the VARCHAR the shared source dims use).
+    enrich_mod.enrich_areas(con)
+    enrich_mod.enrich_history(con)
+    types = {r[0]: r[1] for r in con.execute("DESCRIBE area_classification").fetchall()}
+    assert types["area_code"] == "INTEGER"
+    assert types["valid_from"] == "INTEGER"
+    assert types["valid_to"] == "INTEGER"
+    # Values come back as ints, not strings.
+    (france_code,) = con.execute(
+        "SELECT area_code FROM area_classification WHERE area_label = 'France'"
+    ).fetchone()
+    assert france_code == 68
+    assert _row(con, "USSR")[2] == 1991
+
+
 def test_enrich_areas_without_dim_area_is_noop():
     c = duckdb.connect()
     try:
@@ -96,10 +113,10 @@ def test_enrich_history_fills_validity_for_known_areas(con):
 
     ussr = _row(con, "USSR")
     assert ussr[1] is None          # valid_from left NULL (no founding-year guess)
-    assert ussr[2] == "1991"        # dissolved 1991
+    assert ussr[2] == 1991          # dissolved 1991 (stored as INTEGER)
 
     ssd = _row(con, "South Sudan")
-    assert ssd[1] == "2011"         # split off in 2011
+    assert ssd[1] == 2011           # split off in 2011 (stored as INTEGER)
     assert ssd[2] is None
 
 

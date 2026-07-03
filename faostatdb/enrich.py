@@ -40,13 +40,16 @@ from .schema import table_exists
 # it; edit this file (not the code) to change how areas are classified.
 AREA_CLASSIFICATION_CSV = Path(__file__).resolve().parent / "area_classification.csv"
 
+# This table is package-derived (not source FAOSTAT content), so it is free to use
+# natural types: the FAO internal ``area_code`` and the transition years are stored
+# as ``INTEGER`` (the shared source ``dim_area`` still keeps ``area_code`` as text).
 DDL_AREA_CLASSIFICATION = """\
 CREATE TABLE IF NOT EXISTS area_classification (
-    area_code            VARCHAR PRIMARY KEY,
+    area_code            INTEGER PRIMARY KEY,
     area_label           VARCHAR,
     is_country           BOOLEAN,
-    valid_from           VARCHAR,
-    valid_to             VARCHAR
+    valid_from           INTEGER,
+    valid_to             INTEGER
 );
 """
 
@@ -89,11 +92,11 @@ def enrich_areas(con, csv_path: "str | Path | None" = None) -> int:
                    CAST(is_country AS BOOLEAN) AS is_country
             FROM read_csv(?, header = true, all_varchar = true)
         )
-        SELECT a.area_code,
+        SELECT TRY_CAST(a.area_code AS INTEGER) AS area_code,
                a.area_label,
                c.is_country,
-               NULL AS valid_from,
-               NULL AS valid_to
+               CAST(NULL AS INTEGER) AS valid_from,
+               CAST(NULL AS INTEGER) AS valid_to
         FROM areas a
         LEFT JOIN curated c ON lower(trim(a.area_label)) = c.key
         """,
@@ -132,8 +135,8 @@ def enrich_history(con, csv_path: "str | Path | None" = None) -> int:
             valid_to   = c.valid_to
         FROM (
             SELECT lower(trim(area_name)) AS key,
-                   NULLIF(valid_from, '') AS valid_from,
-                   NULLIF(valid_to, '')   AS valid_to
+                   TRY_CAST(NULLIF(valid_from, '') AS INTEGER) AS valid_from,
+                   TRY_CAST(NULLIF(valid_to, '')   AS INTEGER) AS valid_to
             FROM read_csv(?, header = true, all_varchar = true)
         ) AS c
         WHERE lower(trim(ac.area_label)) = c.key

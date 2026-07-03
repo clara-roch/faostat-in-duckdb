@@ -107,11 +107,11 @@ erDiagram
         VARCHAR flag_description
     }
     area_classification {
-        VARCHAR area_code PK
+        INTEGER area_code PK
         VARCHAR area_label
         BOOLEAN is_country
-        VARCHAR valid_from
-        VARCHAR valid_to
+        INTEGER valid_from
+        INTEGER valid_to
     }
 ```
 

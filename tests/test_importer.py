@@ -39,6 +39,23 @@ FLAG_CSV = """\
 "E","Estimated value"
 """
 
+# A miniature dataset whose label headers do NOT share their code's stem — the
+# shape of the real trade (FT/RFM/TM) and producer-price (PE) datasets:
+#   * "Reporter Countries" / "Partner Countries" are the labels for
+#     "Reporter Country Code" / "Partner Country Code" (stems reporter_country /
+#     partner_country) — plurals that miss the "<stem>_" prefix.
+#   * "Currency" is the label for "ISO Currency Code" (stem iso_currency).
+# Without the pinned overrides these labels ride along on every fact row; with
+# them they must be lifted into dim_reporter_country / dim_partner_country /
+# dim_iso_currency. Every dimension varies so nothing is dropped as constant.
+TRADE_CSV = """\
+"Reporter Country Code","Reporter Countries","Partner Country Code","Partner Countries","Item Code","Item","Element Code","Element","ISO Currency Code","Currency","Year Code","Year","Value","Flag"
+"4","Afghanistan","231","United States of America","15","Wheat","5610","Import","USD","US Dollar","2000","2000","100","A"
+"68","France","276","Germany","15","Wheat","5910","Export","EUR","Euro","2000","2000","200","A"
+"4","Afghanistan","276","Germany","27","Rice","5610","Import","USD","US Dollar","2001","2001","300","E"
+"68","France","231","United States of America","27","Rice","5910","Export","EUR","Euro","2001","2001","400","A"
+"""
+
 
 def _make_archive(tmp_path, main=MAIN_CSV, flag=FLAG_CSV):
     """Write a synthetic FAOSTAT-style archive and return its path."""
@@ -320,6 +337,57 @@ def test_fact_keeps_year_and_year_code_moves_to_dim(con, tmp_path):
         "AND element_label = 'Production' AND year = 2001"
     ).fetchone()
     assert row == (2001, "2001")
+
+
+def test_mismatched_name_labels_are_lifted_into_dimensions(con, tmp_path):
+    # Reporter/partner-country labels and the currency label have header names that
+    # don't share their code's stem; they must still be moved out of the fact table
+    # into their dimensions (not left duplicated on every row).
+    importer_mod.import_archive(
+        con, _make_archive(tmp_path, main=TRADE_CSV), "FT", tmp_path / "b"
+    )
+
+    fact_cols = set(_cols(con, "data_ft"))
+    # Only the keys stay in the fact table.
+    assert {"reporter_country_code", "partner_country_code", "iso_currency_code"} <= fact_cols
+    # The labels are gone from the fact table (both the raw plural name and the
+    # pinned <stem>_label form).
+    assert fact_cols.isdisjoint(
+        {
+            "reporter_countries",
+            "reporter_country_label",
+            "partner_countries",
+            "partner_country_label",
+            "currency",
+            "iso_currency_label",
+        }
+    )
+
+    # Each label landed in its shared dimension, keyed by the code.
+    reporters = dict(
+        con.execute(
+            "SELECT reporter_country_code, reporter_country_label "
+            "FROM dim_reporter_country WHERE dataset_code = 'FT'"
+        ).fetchall()
+    )
+    assert reporters == {"4": "Afghanistan", "68": "France"}
+
+    currencies = dict(
+        con.execute(
+            "SELECT iso_currency_code, iso_currency_label "
+            "FROM dim_iso_currency WHERE dataset_code = 'FT'"
+        ).fetchall()
+    )
+    assert currencies == {"USD": "US Dollar", "EUR": "Euro"}
+
+    # The labelled view re-surfaces the lifted labels with no join fan-out (still 4 rows).
+    (n,) = con.execute("SELECT COUNT(*) FROM view_ft_labelled").fetchone()
+    assert n == 4
+    row = con.execute(
+        "SELECT reporter_country_label, partner_country_label, iso_currency_label "
+        "FROM view_ft_labelled WHERE reporter_country_code = 68 AND value = 200"
+    ).fetchone()
+    assert row == ("France", "Germany", "Euro")
 
 
 def test_leading_apostrophe_stripped_but_leading_zeros_kept(con, tmp_path):

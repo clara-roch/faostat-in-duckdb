@@ -228,7 +228,7 @@ Only column **names** are normalized (to stable `snake_case`); values/flags are 
 
 - Parenthesised qualifiers inline: `"Area Code (M49)"` → `area_code_m49`.
 - Lower-cased, non-alphanumeric runs → `_`: `"Months Code"` → `months_code`.
-- A small override map pins common names: `Item` → `item_label`, `Element` → `element_label`, `Area` → `area_label`, `Flag` → `flag_code`; `Value`, `Year`, `Unit` keep their names. (FAOSTAT has no unit *code*, so unit stays inline.)
+- A small override map pins common names: `Item` → `item_label`, `Element` → `element_label`, `Area` → `area_label`, `Flag` → `flag_code`; `Value`, `Year`, `Unit` keep their names (FAOSTAT has no unit *code*, so unit stays inline). It also pins the few labels whose header doesn't share their code's stem — `Reporter Countries`/`Partner Countries` → `reporter_country_label`/`partner_country_label` (codes `reporter_country_code`/`partner_country_code`) and `Currency` → `iso_currency_label` (code `iso_currency_code`) — so those trade/price labels are lifted into their dimensions instead of repeating on every fact row.
 - Collisions get a numeric suffix (`name`, `name_1`, …).
 
 ### Text-marker apostrophes
@@ -345,11 +345,11 @@ erDiagram
         VARCHAR flag_description
     }
     area_classification {
-        VARCHAR area_code PK
+        INTEGER area_code PK
         VARCHAR area_label
         BOOLEAN is_country
-        VARCHAR valid_from
-        VARCHAR valid_to
+        INTEGER valid_from
+        INTEGER valid_to
     }
 ```
 

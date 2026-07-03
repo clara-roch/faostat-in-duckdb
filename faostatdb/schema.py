@@ -30,6 +30,17 @@ COLUMN_OVERRIDES: dict[str, str] = {
     "value": "value",
     "year": "year",
     "unit": "unit",
+    # Code/label pairs whose *label* header does not share the *code*'s stem, so
+    # the generic ``<stem>`` / ``<stem>_`` grouping in :func:`dimension_groups`
+    # would miss the label and leave it duplicated on every fact row. Pin each
+    # label to ``<stem>_label`` (matching its code column's stem) so dimension
+    # extraction lifts it into the shared ``dim_<stem>`` like any other label:
+    #   "Reporter Country Code" -> reporter_country_code  (stem reporter_country)
+    #   "Partner Country Code"  -> partner_country_code   (stem partner_country)
+    #   "ISO Currency Code"     -> iso_currency_code       (stem iso_currency)
+    "reporter countries": "reporter_country_label",
+    "partner countries": "partner_country_label",
+    "currency": "iso_currency_label",
 }
 
 _PAREN = re.compile(r"\(([^)]*)\)")
