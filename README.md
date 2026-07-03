@@ -8,8 +8,6 @@ FAOSTATdb downloads FAOSTAT bulk ZIP archives, validates them, and imports each 
 
 > FAOSTATdb preserves the statistical content of FAOSTAT exactly, while removing storage-level duplication and adding reproducibility metadata.
 
-New to command-line tools? Jump to [New to CLI tools?](#new-to-cli-tools-a-2-minute-primer) for a gentle primer, then come back here.
-
 ## Install
 
 ```bash
@@ -25,8 +23,8 @@ Required dependency: `duckdb`. Optional: `rich` (nicer progress), `platformdirs`
 ```bash
 faostatdb list                              # what would a build download?
 faostatdb build --include AE --yes          # build one tiny dataset (~77 KB)
-faostatdb build --yes                        # build everything (asks first, unless --yes)
-faostatdb info                               # summarize the built database
+faostatdb build --yes                       # build everything (asks first, unless --yes)
+faostatdb info                              # summarize the built database
 faostatdb sql "SELECT * FROM faostat_dataset LIMIT 5"
 ```
 
@@ -166,7 +164,7 @@ Everything starts at the CLI and flows through the modules below. The entry poin
 9. **Record** — provenance rows in `faostat_dataset` / `faostat_build`.
 10. **Compact** — `compact.compact_database()` rewrites the file to its smallest form.
 
-### Where files are stored {#where-files-are-stored}
+### Where files are stored
 
 | What                                     | Where                                                                             | Lifetime                                                                                    |
 | ---------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -237,7 +235,7 @@ FAOSTAT prefixes its international-code columns — `Area Code (M49)` and `Item 
 
 For each dataset the build also creates `view_<code>_labelled` — the compact fact table with the dimension labels (and flag descriptions) already joined back on. This is what makes no-SQL, dataframe-style querying painless (see [Querying](#querying-the-database)). Views cost nothing on disk, so they are built by default.
 
-### Making the database as small as possible {#making-the-database-as-small-as-possible}
+### Making the database as small as possible
 
 Three lossless reductions shrink the file — dimension extraction, constant-column removal, and then a **compaction pass**. That last step matters: DuckDB's `DROP COLUMN` is a catalog change that leaves the old column's bytes in place, and a plain `CHECKPOINT` does **not** reclaim them. So at the end of a build FAOSTATdb rewrites the whole database into a fresh file with `COPY FROM DATABASE`, which materializes only the columns that still exist. (On a rebuild into an existing file this routinely halves the size — measured 8.3 MB → 4.3 MB on a re-run of a single small dataset.) Disable with `--no-compact` if you prefer speed.
 
@@ -348,9 +346,9 @@ erDiagram
 - **`view_<code>_labelled`** — pre-computes those joins for you. Query this and you never write a join by hand.
 - **`dim_flag`** — labels flag codes; joined into the labelled view too.
 - **`faostat_column_mapping`/ `faostat_constant_column`** — audit trails: what was renamed, and which constant columns were lifted out (with their value).
-- **`area_classification`** — built **by default** (disable with `--no-enrich-areas`) and explicitly **not** source FAOSTAT content. It holds a curated `is_country` flag plus `valid_from`/`valid_to` (disable the latter with `--no-enrich-history`), all read from the committed [`area_classification.csv`](faostatdb/area_classification.csv). See [How `area_classification` is computed](#how-area_classification-is-computed) for the exact rules and why it carries no per-row `confidence`/`classification_source` column.
+- **`area_classification`** — built **by default** (disable with `--no-enrich-areas`) and explicitly **not** source FAOSTAT content. It holds a curated `is_country` flag plus `valid_from`/`valid_to` (disable the latter with `--no-enrich-history`), all read from the committed [`area_classification.csv`](faostatdb/area_classification.csv). See [How `area_classification` is computed](#how-areaclassification-is-computed) for the exact rules and why it carries no per-row `confidence`/`classification_source` column.
 
-### How `area_classification` is computed {#how-area_classification-is-computed}
+### How `area_classification` is computed
 
 `area_classification` is **not** derived from FAOSTAT and downloads nothing. It is built from a single committed, hand-curated file — [`faostatdb/area_classification.csv`](faostatdb/area_classification.csv) — authored from world knowledge. That CSV is the package's editable source of truth; the build reads it (with DuckDB's `read_csv`, no pandas) and matches it to `dim_area` by area name. Its columns are exactly `area_name, is_country, valid_from, valid_to`:
 
@@ -359,7 +357,7 @@ erDiagram
 
 Because the whole table comes from one reviewable CSV, **changing a classification is just editing that file and rebuilding** — no code change, and the diff shows exactly what moved. An area that appears in `dim_area` but is missing from the CSV is written with `is_country = NULL` (unclassified) rather than guessed, so new FAOSTAT areas surface as gaps to fill instead of silent mistakes. Disable the classification with `--no-enrich-areas` and the validity fill with `--no-enrich-history`.
 
-## Querying the database {#querying-the-database}
+## Querying the database
 
 The output is a plain DuckDB file — query it from any language. Most FAOSTAT users don't want to write SQL, so the primary examples below use **dataframe-style APIs** on the `view_<code>_labelled` views, with SQL shown afterwards as the advanced/diagnostic path.
 
