@@ -7,9 +7,12 @@ Two distinct locations:
   re-run reuses them instead of re-downloading — see FAOSTATdb.md > hot restart),
   which means the project-local ``./faostat_temp_download/`` by default. See
   :func:`resolve_download_dir`.
-* **The final ``.duckdb``** is written *outside* the repository, in the directory
-  named by the ``FABIO_DUCKDB_DIR`` environment variable. See
-  :func:`resolve_database_path`.
+* **The final ``.duckdb``** is written *project-local* by default (a bare filename
+  like ``faostat.duckdb`` lands in the current working directory, next to the
+  project that built it), with the ``FAOSTATDB_DATABASE_DIR`` environment variable
+  as an explicit override for the parent directory. See
+  :func:`resolve_database_path`. Keep the built DB out of git via ``.gitignore``,
+  not by hiding it in an OS data directory.
 
 Download-dir resolution order (highest precedence first):
 
@@ -34,7 +37,7 @@ MANIFEST_DIRNAME = ".faostatdb-downloads"
 MANIFEST_FILENAME = "manifest.jsonl"
 APP_NAME = "faostatdb"
 ENV_DOWNLOAD_DIR = "FAOSTATDB_DOWNLOAD_DIR"
-ENV_DUCKDB_DIR = "FABIO_DUCKDB_DIR"
+ENV_DATABASE_DIR = "FAOSTATDB_DATABASE_DIR"
 
 
 def resolve_download_dir(
@@ -69,17 +72,18 @@ def resolve_database_path(database: str, *, cwd: Path | None = None) -> Path:
     """Resolve where the final ``.duckdb`` is written.
 
     An absolute ``database`` is used verbatim. A bare filename (or relative path)
-    is placed inside ``$FABIO_DUCKDB_DIR``; if that variable is unset, it falls
-    back to the OS data dir — never the repository — so built databases don't get
-    committed by accident. The parent directory is created.
+    is placed inside ``$FAOSTATDB_DATABASE_DIR`` if that variable is set;
+    otherwise it resolves against ``cwd`` so the built database lives project-local,
+    next to whatever built it. Keep it out of git via ``.gitignore`` rather than by
+    hiding it elsewhere. The parent directory is created.
     """
     base = cwd or Path.cwd()
     db = Path(os.path.expandvars(database)).expanduser()
     if db.is_absolute():
         target = db
     else:
-        dir_env = _expand(os.environ.get(ENV_DUCKDB_DIR))
-        parent = Path(dir_env).expanduser() if dir_env else _os_data_dir()
+        dir_env = _expand(os.environ.get(ENV_DATABASE_DIR))
+        parent = Path(dir_env).expanduser() if dir_env else base
         if not parent.is_absolute():
             parent = base / parent
         target = parent / db
@@ -111,16 +115,6 @@ def _os_cache_dir() -> Path:
         from platformdirs import user_cache_dir  # type: ignore
 
         return Path(user_cache_dir(APP_NAME))
-    except ImportError:
-        return Path(tempfile.gettempdir()) / APP_NAME
-
-
-def _os_data_dir() -> Path:
-    """OS-appropriate data dir (``platformdirs`` if available, else tempdir)."""
-    try:
-        from platformdirs import user_data_dir  # type: ignore
-
-        return Path(user_data_dir(APP_NAME))
     except ImportError:
         return Path(tempfile.gettempdir()) / APP_NAME
 

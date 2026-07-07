@@ -31,7 +31,7 @@ CONFIG_FILENAME = "faostatdb.toml"
 SECRETS_FILENAME = "secrets.env"
 
 # Environment-variable names that override individual config values. These are
-# what users set in their own ``secrets.env``. ``FABIO_DUCKDB_DIR`` and
+# what users set in their own ``secrets.env``. ``FAOSTATDB_DATABASE_DIR`` and
 # ``FAOSTATDB_DOWNLOAD_DIR`` (consumed in faostatdb.paths) point at directories;
 # the variables below override values inside ``faostatdb.toml``.
 ENV_DATABASE = "FAOSTATDB_DATABASE"

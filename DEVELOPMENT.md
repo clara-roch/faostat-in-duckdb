@@ -51,13 +51,13 @@ Everything starts at the CLI and flows through the modules below. The entry poin
 
 | What                                     | Where                                                                             | Lifetime                                                                                    |
 | ---------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Output database**                      | `$FABIO_DUCKDB_DIR/<build.database>` (see below)                                  | permanent — the product, kept outside the repo                                              |
+| **Output database**                      | project-local `./<build.database>` by default (see below)                         | permanent — the product; git-ignored, not committed by accident                             |
 | **Cached archives** (`*.zip`)            | the resolved `download_dir` — project-local `./faostat_temp_download/` by default | deleted after a *successful* build (kept after a failure, or always with `--keep-archives`) |
 | **In-progress downloads** (`*.part`)     | inside `download_dir`                                                             | transient — renamed to `*.zip` on completion                                                |
 | **Download manifest** (`manifest.jsonl`) | `<download_dir>/.faostatdb-downloads/`                                            | persists between runs (hot restart)                                                         |
 | **Extracted CSVs**                       | a temp build dir under `download_dir`                                             | deleted immediately after each import                                                       |
 
-The **output database** location is resolved from `build.database`: an absolute path is used as-is; a bare filename (default `faostat.duckdb`) is placed inside `$FABIO_DUCKDB_DIR` (or the OS data dir if unset) — **never** the repository, so a built database is never committed by accident.
+The **output database** location is resolved from `build.database`: an absolute path is used as-is; a bare filename (default `faostat.duckdb`) is written project-local, in the current working directory. Set `$FAOSTATDB_DATABASE_DIR` to redirect a bare filename to a specific directory (e.g. a large external volume). The built database is git-ignored (see `.gitignore`) rather than hidden in an OS data directory, so it's easy to find yet never committed by accident.
 
 ## How the database is constructed
 

@@ -344,7 +344,10 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
             ),
             now=_now(),
         )
-        reporter.event(rec.code, "download", "downloading")
+        # A live progress bar already shows the "downloading" state, so only
+        # emit the textual transition when there is no bar to make it redundant.
+        if not reporter.shows_live_progress:
+            reporter.event(rec.code, "download", "downloading")
 
     with reporter.download_phase(len(to_download)) as tracker:
         def worker(rec):
@@ -389,7 +392,10 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                         ),
                         now=_now(),
                     )
-                    reporter.event(rec.code, "download", "downloaded")
+                    size = _human_bytes(archives[rec.code].stat().st_size)
+                    reporter.event(
+                        rec.code, "download", "downloaded", message=f"{size} downloaded"
+                    )
 
     # --- Phase 2: validate + import sequentially into DuckDB -----------------
     import duckdb

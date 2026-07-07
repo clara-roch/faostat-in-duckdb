@@ -69,7 +69,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 
 | Flag                                       | Effect                                                                                                                                                                                                                                        |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename lands under `$FABIO_DUCKDB_DIR`; see [Where files are stored](#where-files-are-stored).                                                                             |
+| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                                                             |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                      |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                               |
 | `--jobs N`                                 | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`).                                                                                                                                                         |
@@ -444,7 +444,7 @@ Resolution order, lowest precedence first: `faostatdb.toml` → `secrets.env` en
 
 ```toml
 [build]
-database = "faostat.duckdb"             # filename; final DB under $FABIO_DUCKDB_DIR
+database = "faostat.duckdb"             # filename; final DB written project-local (or under $FAOSTATDB_DATABASE_DIR)
 download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
 keep_archives = false                   # delete cached .zip after a successful build (hot restart still reuses them after a failure)
 jobs = 0                                # parallel downloads; 0 = auto min(8, 2*cpu)
@@ -471,7 +471,7 @@ historical_validity = true    # fill valid_from/valid_to for former areas (impli
 Each value maps to an environment variable; set only the ones you want to change.
 
 ```dotenv
-FABIO_DUCKDB_DIR=C:\where\it\is\stored     # output location (kept out of the repo)
+FAOSTATDB_DATABASE_DIR=C:\where\it\is\stored  # optional: redirect a bare-filename DB to this dir (default: project-local)
 
 FAOSTATDB_DATABASE=faostat.duckdb
 FAOSTATDB_DOWNLOAD_DIR=faostat_temp_download

@@ -87,6 +87,17 @@ class Reporter:
         # Auto-fall back to ASCII if the terminal encoding can't render the glyphs.
         self.icons = _ICONS_ASCII if (ascii_mode or not _stdout_unicode()) else _ICONS_UNICODE
 
+    @property
+    def shows_live_progress(self) -> bool:
+        """True if :meth:`download_phase` will render live per-dataset bars.
+
+        When it does, a textual ``download: downloading`` event line is pure
+        redundancy — the bar already conveys start/progress. Callers gate that
+        line on this so plain, ``--no-progress`` and ``--json`` modes (where the
+        bar is absent) still get the transition, but rich terminals don't.
+        """
+        return self._use_rich and not self.no_progress
+
     # -- human free-form line ------------------------------------------------
     def log(self, message: str) -> None:
         """Emit a single free-form progress line to stderr."""

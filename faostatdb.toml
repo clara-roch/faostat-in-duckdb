@@ -5,8 +5,8 @@
 # precedence over the values here. See the README "Configuration" section.
 
 [build]
-database = "faostat.duckdb"             # filename; final DB is written under $FABIO_DUCKDB_DIR
-                                        #   override: FAOSTATDB_DATABASE
+database = "faostat.duckdb"             # filename; final DB written project-local (cwd) by default
+                                        #   override: FAOSTATDB_DATABASE (filename), FAOSTATDB_DATABASE_DIR (parent dir)
 download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
                                         #   override: FAOSTATDB_DOWNLOAD_DIR
 keep_archives = false                   # delete cached .zip after a successful build
