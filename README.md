@@ -14,7 +14,7 @@ The only prerequisite you need to install yourself is Python >= 3.11. All Python
 
 Choose one of these installation methods:
 
-### With `python -m pip`
+### With `python3 -m pip`
 
 ```bash
 python3 -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
@@ -26,7 +26,7 @@ python3 -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faos
 pipx install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
 ```
 
-You do not need to install `duckdb` yourself. The optional `[ui]` extra only adds nicer progress output and better cache-directory defaults.
+The optional `[ui]` extra only adds nicer progress output.
 
 ## Quick start
 
