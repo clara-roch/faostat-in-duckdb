@@ -126,13 +126,17 @@ def manifest_path(download_dir: Path) -> Path:
     return d / MANIFEST_FILENAME
 
 
-def clean_cache(download_dir: Path) -> tuple[int, int]:
+def clean_cache(download_dir: Path, *, remove_dir: bool = False) -> tuple[int, int]:
     """Delete cached archives and the manifest under ``download_dir``.
 
     Removes every ``*.zip`` / ``*.part`` in the directory and the whole
     ``.faostatdb-downloads`` manifest/build subdir. Returns
     ``(archives_removed, bytes_freed)`` for reporting. Used by ``faostatdb
     clean-cache``.
+
+    When ``remove_dir`` is true, also remove ``download_dir`` if it is empty after
+    the managed cache files are deleted. Any unrelated files keep the directory in
+    place.
     """
     removed = 0
     freed = 0
@@ -148,4 +152,9 @@ def clean_cache(download_dir: Path) -> tuple[int, int]:
     manifest_dir = download_dir / MANIFEST_DIRNAME
     if manifest_dir.is_dir():
         shutil.rmtree(manifest_dir, ignore_errors=True)
+    if remove_dir:
+        try:
+            download_dir.rmdir()
+        except OSError:
+            pass
     return removed, freed

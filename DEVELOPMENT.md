@@ -7,7 +7,7 @@ Internal documentation: module roles, the build pipeline, and the data-model dec
 From a local checkout, install FAOSTATdb in editable mode:
 
 ```bash
-python -m pip install -e ".[ui,dev]"
+python3 -m pip install -e ".[ui,dev]"
 ```
 
 That gives you the `faostatdb` command, the optional UI dependencies (`rich`, `platformdirs`), and the test dependency (`pytest`). If you do not want the optional UI extras, use `python -m pip install -e ".[dev]"` instead.

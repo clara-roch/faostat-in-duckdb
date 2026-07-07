@@ -7,8 +7,10 @@ import zipfile
 import duckdb
 
 from faostatdb import importer as importer_mod
+from faostatdb import metadata as metadata_mod
 from faostatdb import schema as schema_mod
-from faostatdb.cli import main
+from faostatdb.config import BuildConfig, Config, DatasetsConfig, EnrichmentConfig
+from faostatdb.cli import main, run_build
 
 MAIN = (
     '"Area Code","Area","Item Code","Item","Value","Flag"\n'
@@ -28,6 +30,38 @@ def test_config_init_writes_and_respects_force(tmp_path, monkeypatch):
     # Second run without --force refuses; with --force it overwrites.
     assert main(["config", "init"]) == 1
     assert main(["config", "init", "--force"]) == 0
+
+
+def test_successful_build_removes_default_download_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FAOSTATDB_DOWNLOAD_DIR", raising=False)
+    rec = metadata_mod.DatasetRecord(
+        dataset_code="QCL",
+        dataset_name="Crops",
+        file_location="https://example.test/QCL.zip",
+        file_rows=1,
+    )
+    snapshot = metadata_mod.MetadataSnapshot(
+        url="https://example.test/datasets.json", sha256="0" * 64, datasets=[rec]
+    )
+
+    def fake_download(_url, dest, **_kwargs):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("QCL_E_All_Data.csv", MAIN)
+        return dest
+
+    monkeypatch.setattr(metadata_mod, "fetch_and_parse", lambda: snapshot)
+    monkeypatch.setattr("faostatdb.download.download_with_retry", fake_download)
+
+    cfg = Config(
+        build=BuildConfig(database="faostat.duckdb", jobs=1, compact=False),
+        datasets=DatasetsConfig(mode="include", include=["QCL"]),
+        enrichment=EnrichmentConfig(area_classification=False, historical_validity=False),
+    )
+
+    assert run_build(cfg, assume_yes=True, strict=True) == 0
+    assert (tmp_path / "faostat.duckdb").is_file()
+    assert not (tmp_path / "faostat_temp_download").exists()
 
 
 def _built_db(tmp_path):

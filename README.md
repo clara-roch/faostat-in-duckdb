@@ -10,12 +10,14 @@ FAOSTATdb downloads FAOSTAT bulk ZIP archives, validates them, and imports each 
 
 ## Install
 
+The only prerequisite you need to install yourself is Python >= 3.11. All Python package dependencies, including `duckdb`, are installed automatically by `pip`.
+
 Choose one of these installation methods:
 
 ### With `python -m pip`
 
 ```bash
-python -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
+python3 -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
 ```
 
 ### With `pipx`
@@ -69,7 +71,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 
 | Flag                                       | Effect                                                                                                                                                                                                                                        |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                                                             |
+| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                        |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                      |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                               |
 | `--jobs N`                                 | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`).                                                                                                                                                         |

@@ -5,7 +5,9 @@ import os
 from faostatdb.paths import (
     ENV_DATABASE_DIR,
     ENV_DOWNLOAD_DIR,
+    MANIFEST_DIRNAME,
     PROJECT_LOCAL_DIRNAME,
+    clean_cache,
     resolve_database_path,
     resolve_download_dir,
 )
@@ -87,3 +89,30 @@ def test_database_unset_env_dir_reference_falls_through_to_cwd(tmp_path, monkeyp
     monkeypatch.setenv(ENV_DATABASE_DIR, "${UNSET_FAOSTATDB_VAR_XYZ}")
     out = resolve_database_path("faostat.duckdb", cwd=tmp_path)
     assert out == tmp_path / "faostat.duckdb"
+
+
+def test_clean_cache_can_remove_empty_download_dir(tmp_path):
+    download_dir = tmp_path / PROJECT_LOCAL_DIRNAME
+    manifest_dir = download_dir / MANIFEST_DIRNAME
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "manifest.jsonl").write_text("{}\n", encoding="utf-8")
+    (download_dir / "QCL.zip").write_bytes(b"archive")
+
+    removed, freed = clean_cache(download_dir, remove_dir=True)
+
+    assert removed == 1
+    assert freed == len(b"archive")
+    assert not download_dir.exists()
+
+
+def test_clean_cache_keeps_download_dir_with_unrelated_files(tmp_path):
+    download_dir = tmp_path / PROJECT_LOCAL_DIRNAME
+    download_dir.mkdir()
+    (download_dir / "QCL.zip").write_bytes(b"archive")
+    (download_dir / "README.txt").write_text("keep me", encoding="utf-8")
+
+    clean_cache(download_dir, remove_dir=True)
+
+    assert download_dir.is_dir()
+    assert not (download_dir / "QCL.zip").exists()
+    assert (download_dir / "README.txt").is_file()
