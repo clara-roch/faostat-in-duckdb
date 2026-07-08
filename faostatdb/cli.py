@@ -317,7 +317,9 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
     if years:
         reporter.log(
             f"year filter active: keeping only rows for year(s) {cfg.build.years} "
-            f"({len(years)} year(s)); datasets without a year column import in full"
+            f"({len(years)} year(s)). Datasets already present in {cfg.build.database} "
+            f"accumulate (these years are merged in, other years kept); datasets "
+            f"without a year column import in full"
         )
 
     manifest = download_mod.Manifest(paths_mod.manifest_path(download_dir))
@@ -531,12 +533,15 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
             # any divergence from the approximate FileRows metadata (advisory).
             lossless = _check_row_count(rec, imp, reporter)
             if lossless:
+                if imp.appended_rows is not None:
+                    message = (
+                        f"accumulated {imp.appended_rows:,} row(s) into "
+                        f"{imp.table_name} (now {imp.row_count:,} rows)"
+                    )
+                else:
+                    message = f"imported {imp.row_count:,} rows into {imp.table_name}"
                 reporter.event(
-                    rec.code,
-                    "import",
-                    "imported",
-                    rows=imp.row_count,
-                    message=f"imported {imp.row_count:,} rows into {imp.table_name}",
+                    rec.code, "import", "imported", rows=imp.row_count, message=message
                 )
             elif strict:
                 return 1
@@ -930,11 +935,18 @@ def _check_row_count(rec, imp, reporter) -> bool:
         # Intentional subset: the imported rows are those matching the year filter,
         # so they are expected to be fewer than the full delivered CSV. Report the
         # kept/total split plainly so it can't be mistaken for data loss.
-        reporter.log(
-            f"note: {rec.code} filtered to year(s) "
-            f"{','.join(str(y) for y in imp.year_filter)}: kept {imp.row_count:,} "
-            f"of {imp.source_row_count:,} source record(s)"
-        )
+        years_str = ",".join(str(y) for y in imp.year_filter)
+        if imp.appended_rows is not None:
+            reporter.log(
+                f"note: {rec.code} accumulated year(s) {years_str} into the existing "
+                f"database: added {imp.appended_rows:,} row(s); the dataset now holds "
+                f"{imp.row_count:,} row(s) across all imported years"
+            )
+        else:
+            reporter.log(
+                f"note: {rec.code} filtered to year(s) {years_str}: kept "
+                f"{imp.row_count:,} of {imp.source_row_count:,} source record(s)"
+            )
         return True
 
     if not imp.lossless:

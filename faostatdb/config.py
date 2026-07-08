@@ -53,7 +53,9 @@ class BuildConfig:
     # comma-separated single years and inclusive ranges, e.g. "2010",
     # "2000,2005,2010" or "1990-1995,2020". FAOSTAT ships every year in one bulk
     # archive, so the whole ZIP is still downloaded; the filter drops non-matching
-    # rows at import time (see importer.import_csv). Parsed by parse_years.
+    # rows at import time (see importer.import_csv). Building years into a database
+    # that already holds the dataset *accumulates* — the new years are merged in and
+    # previously-stored years are kept. Parsed by parse_years.
     years: str = ""
 
 

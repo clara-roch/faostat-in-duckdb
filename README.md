@@ -76,7 +76,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 | `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                        |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                      |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                               |
-| `--years 2000-2010,2020`                   | Keep **only** rows for these year(s) (single years, comma lists and inclusive `lo-hi` ranges). The whole archive is still downloaded (FAOSTAT ships all years in one ZIP); non-matching rows are dropped at import. Datasets with no year column import in full. Overrides `build.years`. |
+| `--years 2000-2010,2020`                   | Keep **only** rows for these year(s) (single years, comma lists and inclusive `lo-hi` ranges). The whole archive is still downloaded (FAOSTAT ships all years in one ZIP); non-matching rows are dropped at import. Datasets with no year column import in full. **Accumulates**: if the database already holds a dataset, the new years are merged in and existing years are kept — see [Building up years incrementally](#building-up-years-incrementally). Overrides `build.years`. |
 | `--jobs N`                                 | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`).                                                                                                                                                         |
 | `--keep-archives` / `--no-keep-archives`   | Force keeping / deleting the cached `*.zip` after a successful build. Default: **delete** on success (`keep_archives = false`); hot restart still reuses them after a failure.                                                                |
 | `--download-dir DIR`                       | Where raw archives are cached (overrides `build.download_dir`).                                                                                                                                                                               |
@@ -98,7 +98,7 @@ faostatdb build --yes --json > build-events.jsonl          # CI-friendly log
 
 #### Re-running only the missing / failed datasets
 
-A build is **incremental and non-destructive** as long as `overwrite` stays `false` (the default). The build opens the existing `.duckdb` in place and only touches the tables for datasets it imports — each import does `DROP TABLE IF EXISTS data_<code>` for *that* code alone, then recreates it. Any `data_<code>` not in the current selection is left exactly as it was.
+A build is **incremental and non-destructive** as long as `overwrite` stays `false` (the default). The build opens the existing `.duckdb` in place and only touches the tables for datasets it imports — each import replaces `data_<code>` for *that* code alone (or, with `--years`, merges the new years into it — see [Building up years incrementally](#building-up-years-incrementally)). Any `data_<code>` not in the current selection is left exactly as it was.
 
 So if some datasets failed (a dropped download, a corrupt archive) while the rest imported fine, re-run with `--include` listing only the codes to redo:
 
@@ -109,6 +109,21 @@ faostatdb build --yes --include CBH,SXS,WCAD
 Failed datasets keep their cached archives, so the re-run reuses them via the hot-restart manifest instead of downloading again.
 
 > ⚠️ Do **not** set `overwrite = true` for this — it wipes the whole database file before building, losing the datasets you already have.
+
+#### Building up years incrementally
+
+`--years` **accumulates** into an existing database. When you build a dataset with a year filter and that dataset is *already* in the target `.duckdb`, FAOSTATdb merges the new years in rather than replacing the table: the requested years are refreshed and every other year already stored is left untouched.
+
+```bash
+faostatdb build --include QCL --years 2017 --keep-archives --yes   # DB now holds 2017
+faostatdb build --include QCL --years 2018 --keep-archives --yes   # DB now holds 2017 + 2018
+```
+
+- Re-running a year that is already present just **refreshes** it (idempotent) — no duplicate rows.
+- The already-stored years are **not re-parsed**; only the new archive is read and merged with in-database SQL.
+- Because FAOSTAT ships every year in one ZIP, the archive is still downloaded in full. Set `--keep-archives` (or `keep_archives = true`) so the second build **reuses the cached ZIP** instead of downloading it again.
+- A build **without** `--years` is a full rebuild: it replaces the whole dataset (accumulation is a year-slicing feature only).
+- A dataset with no `Year` column can't be sliced, so it imports in full.
 
 ## Caching & re-runs
 

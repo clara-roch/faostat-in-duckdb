@@ -22,6 +22,9 @@ years = ""                              # "" = all years; else keep only these, 
                                         #   "2010", "2000,2005,2010" or "1990-1995,2020".
                                         #   Whole archive still downloaded; non-matching
                                         #   rows dropped at import (--years overrides).
+                                        #   Accumulates: building years into a DB that
+                                        #   already has the dataset merges them in and
+                                        #   keeps the years already stored.
 
 [datasets]
 mode = "all"                            # all | include | exclude

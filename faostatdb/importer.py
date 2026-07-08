@@ -41,11 +41,13 @@ from pathlib import Path
 
 from .schema import (
     DDL_FAOSTAT_CONSTANT_COLUMN,
+    column_names,
     create_labelled_view,
     dimension_groups,
     dimension_table_for,
     normalize_columns,
     record_column_mapping,
+    table_exists,
 )
 
 
@@ -154,6 +156,11 @@ class ImportResult:
     #: When set, ``row_count`` is an intentional subset of ``source_row_count``
     #: (the full delivered CSV), so the two are not expected to agree.
     year_filter: tuple[int, ...] | None = None
+    #: Rows added by an *accumulate* import that merged into a pre-existing fact
+    #: table (see :func:`import_csv`). ``None`` for a normal (replace) import. When
+    #: set, ``row_count`` is the dataset's total row count *after* the merge, and
+    #: ``appended_rows`` is how many rows this build contributed for its years.
+    appended_rows: int | None = None
 
     @property
     def lossless(self) -> bool:
@@ -280,6 +287,14 @@ def import_csv(
     After the raw load we record the column mapping, extract dimensions, and drop
     constant columns. When ``keep_raw`` is set, an untouched copy of the fully
     projected import is kept as ``raw_<code>`` for debugging losslessness.
+
+    **Accumulate mode.** When a year filter is active *and* ``data_<code>`` already
+    exists (a prior ``--years`` build wrote it), the new years are merged into that
+    table instead of replacing it: rows for the incoming years are refreshed and
+    other years are left untouched. So ``build --years 2017`` followed by
+    ``build --years 2018`` leaves both years in the database, and re-running a year
+    just refreshes it (idempotent). The 2017 rows are not re-parsed — only the new
+    archive is read and merged with in-database SQL. See :func:`_merge_incoming`.
     """
     table = table_name_for(dataset_code)
     encoding = detect_encoding(csv_path)
@@ -293,15 +308,21 @@ def import_csv(
     where = _year_where_clause(raw_cols, norm_cols, years) if years else None
     applied_years = tuple(sorted(years)) if (years and where) else None
 
+    # Accumulate into an existing dataset only when we have both a year key to merge
+    # on and a table already present. Otherwise this is a normal (replacing) import,
+    # for which we build the fact table in place under its final name.
+    append_mode = applied_years is not None and table_exists(con, table)
+    target = f"_incoming_{dataset_code.lower()}" if append_mode else table
+
     # Project every source column through "Raw Name" AS snake_name so no column is
     # dropped and no value/flag is changed at load time.
     projection = ", ".join(
         f'"{raw}" AS {norm}' for raw, norm in zip(raw_cols, norm_cols)
     )
-    con.execute(f'DROP TABLE IF EXISTS "{table}"')
+    con.execute(f'DROP TABLE IF EXISTS "{target}"')
     try:
         con.execute(
-            f'CREATE TABLE "{table}" AS '
+            f'CREATE TABLE "{target}" AS '
             f"SELECT {projection} "
             f"FROM read_csv(?, header=true, encoding='{encoding}', "
             f"sample_size=-1, auto_type_candidates={_AUTO_TYPE_CANDIDATES}) "
@@ -315,7 +336,7 @@ def import_csv(
             f"columns={list(zip(raw_cols, norm_cols))}): {exc}"
         ) from exc
 
-    (count,) = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+    (count,) = con.execute(f'SELECT COUNT(*) FROM "{target}"').fetchone()
 
     # Verify losslessness against the delivered CSV itself — counted independently
     # of DuckDB — rather than the approximate FileRows metadata. Dimension/constant
@@ -333,26 +354,155 @@ def import_csv(
     if keep_raw:
         raw_table = raw_table_name_for(dataset_code)
         con.execute(f'DROP TABLE IF EXISTS "{raw_table}"')
-        con.execute(f'CREATE TABLE "{raw_table}" AS SELECT * FROM "{table}"')
+        con.execute(f'CREATE TABLE "{raw_table}" AS SELECT * FROM "{target}"')
 
     # Remove FAOSTAT's leading text-marker apostrophe from the M49/CPC code columns
     # before dimensions are extracted, so the cleaned code flows into dim_<stem>.
-    strip_leading_apostrophe(con, table)
+    strip_leading_apostrophe(con, target)
 
+    # The column mapping is a property of the dataset, so record it under the final
+    # fact-table name regardless of whether we imported into a temp merge staging.
     record_column_mapping(con, dataset_code, table, raw_cols, norm_cols)
-    extract_dimensions(con, table, dataset_code, norm_cols)
-    extract_constant_columns(con, table, dataset_code)
+    extract_dimensions(con, target, dataset_code, norm_cols, append=append_mode)
+
+    if not append_mode:
+        extract_constant_columns(con, target, dataset_code)
+        return ImportResult(
+            dataset_code=dataset_code,
+            table_name=table,
+            row_count=count,
+            source_row_count=source_rows,
+            count_method=method,
+            year_filter=applied_years,
+        )
+
+    # Merge the reduced incoming rows into the existing fact table, then discard the
+    # staging table. ``count`` here is the rows this build contributes for its years.
+    total = _merge_incoming(con, dataset_code, table, target, applied_years)
+    con.execute(f'DROP TABLE IF EXISTS "{target}"')
     return ImportResult(
         dataset_code=dataset_code,
         table_name=table,
-        row_count=count,
+        row_count=total,
         source_row_count=source_rows,
         count_method=method,
         year_filter=applied_years,
+        appended_rows=count,
     )
 
 
-def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str]) -> None:
+def _column_types(con, table: str) -> dict[str, str]:
+    """Map each column of ``table`` to its DuckDB type (via ``DESCRIBE``)."""
+    return {r[0]: r[1] for r in con.execute(f'DESCRIBE "{table}"').fetchall()}
+
+
+def _merge_incoming(
+    con, dataset_code: str, existing: str, incoming: str, years: tuple[int, ...]
+) -> int:
+    """Merge the reduced ``incoming`` staging table into the existing fact table.
+
+    The two tables come from independent year slices, so their reduced shapes can
+    differ: a column that was constant (and therefore dropped) in the years already
+    stored may vary in the incoming years, or vice-versa. We reconcile the schemas
+    first, then replace exactly the incoming years — ``DELETE`` the rows for
+    ``years`` from ``existing`` and ``INSERT`` the staged rows — so other years are
+    left untouched and re-running a year is idempotent. Returns the dataset's total
+    row count after the merge.
+    """
+    existing_cols = column_names(con, existing)
+
+    # The merge key is ``year``. A table written by an older version (before year
+    # was protected from constant-column removal) may have dropped it into
+    # faostat_constant_column when it held a single year; restore it so we can merge.
+    if "year" not in existing_cols:
+        row = con.execute(
+            "SELECT value FROM faostat_constant_column "
+            "WHERE dataset_code = ? AND column_name = 'year'",
+            [dataset_code],
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"cannot accumulate years into {existing!r}: it has no 'year' column "
+                f"to merge on. Rebuild the dataset (e.g. without --years, or with all "
+                f"wanted years in one --years run)."
+            )
+        year_type = _column_types(con, incoming).get("year", "BIGINT")
+        con.execute(f'ALTER TABLE "{existing}" ADD COLUMN "year" {year_type}')
+        con.execute(
+            f'UPDATE "{existing}" SET "year" = CAST(? AS {year_type})', [row[0]]
+        )
+        con.execute(
+            "DELETE FROM faostat_constant_column "
+            "WHERE dataset_code = ? AND column_name = 'year'",
+            [dataset_code],
+        )
+        existing_cols = column_names(con, existing)
+
+    # Reconcile columns the existing table dropped as constant but that the incoming
+    # slice carries. If the incoming values match the recorded constant it stays
+    # dropped; otherwise the column now varies across years, so we restore it on the
+    # existing rows (backfilled from the recorded constant) and keep it in both.
+    incoming_types = _column_types(con, incoming)
+    for col in [c for c in column_names(con, incoming) if c not in existing_cols]:
+        n, ndist = con.execute(
+            f'SELECT COUNT("{col}"), COUNT(DISTINCT "{col}") FROM "{incoming}"'
+        ).fetchone()
+        total_rows = con.execute(f'SELECT COUNT(*) FROM "{incoming}"').fetchone()[0]
+        rec = con.execute(
+            "SELECT value FROM faostat_constant_column "
+            "WHERE dataset_code = ? AND column_name = ?",
+            [dataset_code, col],
+        ).fetchone()
+        recorded = rec[0] if rec else None
+        constant = ndist == 0 or (ndist == 1 and n == total_rows)
+        incoming_value = None
+        if constant and ndist == 1:
+            (incoming_value,) = con.execute(
+                f'SELECT CAST("{col}" AS VARCHAR) FROM "{incoming}" '
+                f'WHERE "{col}" IS NOT NULL LIMIT 1'
+            ).fetchone()
+        if constant and rec is not None and incoming_value == recorded:
+            # Still the same constant across the new years — keep it dropped.
+            con.execute(f'ALTER TABLE "{incoming}" DROP COLUMN "{col}"')
+            continue
+        # The column is not the recorded constant for these years: restore it on the
+        # existing rows so both slices carry it, then drop its constant record.
+        col_type = incoming_types.get(col, "VARCHAR")
+        con.execute(f'ALTER TABLE "{existing}" ADD COLUMN "{col}" {col_type}')
+        con.execute(
+            f'UPDATE "{existing}" SET "{col}" = CAST(? AS {col_type})', [recorded]
+        )
+        con.execute(
+            "DELETE FROM faostat_constant_column WHERE dataset_code = ? AND column_name = ?",
+            [dataset_code, col],
+        )
+    existing_cols = column_names(con, existing)
+
+    # Any column the existing table has but the incoming slice lacks is added to the
+    # staging table as NULL so the INSERT lines up. (Shouldn't normally happen —
+    # incoming carries every non-dimension source column — but keeps the merge safe.)
+    incoming_cols = column_names(con, incoming)
+    for col in [c for c in existing_cols if c not in incoming_cols]:
+        con.execute(
+            f'ALTER TABLE "{incoming}" ADD COLUMN "{col}" '
+            f'{_column_types(con, existing).get(col, "VARCHAR")}'
+        )
+
+    # Replace exactly the incoming years, leaving every other year in place.
+    in_list = ", ".join(str(y) for y in years)
+    con.execute(
+        f'DELETE FROM "{existing}" WHERE TRY_CAST("year" AS BIGINT) IN ({in_list})'
+    )
+    col_list = ", ".join(f'"{c}"' for c in existing_cols)
+    con.execute(
+        f'INSERT INTO "{existing}" ({col_list}) SELECT {col_list} FROM "{incoming}"'
+    )
+    return con.execute(f'SELECT COUNT(*) FROM "{existing}"').fetchone()[0]
+
+
+def extract_dimensions(
+    con, table: str, dataset_code: str, norm_cols: list[str], *, append: bool = False
+) -> None:
     """Move redundant dimension attributes out of ``table`` into ``dim_<stem>``.
 
     For every dimension group (e.g. ``area_code`` + ``area_code_m49`` +
@@ -393,14 +543,26 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
             if m not in existing:
                 con.execute(f'ALTER TABLE "{dim}" ADD COLUMN IF NOT EXISTS "{m}" VARCHAR')
 
-        # Re-import is idempotent: replace this dataset's dimension rows.
-        con.execute(f'DELETE FROM "{dim}" WHERE dataset_code = ?', [dataset_code])
         insert_cols = ", ".join(['dataset_code', *(f'"{m}"' for m in members)])
-        con.execute(
-            f'INSERT INTO "{dim}" ({insert_cols}) '
-            f'SELECT DISTINCT ?, {member_sql} FROM "{table}"',
-            [dataset_code],
-        )
+        if append:
+            # Accumulate mode (a later --years build merging into an existing DB):
+            # keep the dimension members already recorded for earlier years and add
+            # only the ones this build's rows introduce, matched on the key column.
+            con.execute(
+                f'INSERT INTO "{dim}" ({insert_cols}) '
+                f'SELECT DISTINCT ?, {member_sql} FROM "{table}" AS s '
+                f'WHERE NOT EXISTS (SELECT 1 FROM "{dim}" AS d '
+                f'WHERE d.dataset_code = ? AND d."{key}" = CAST(s."{key}" AS VARCHAR))',
+                [dataset_code, dataset_code],
+            )
+        else:
+            # Re-import is idempotent: replace this dataset's dimension rows.
+            con.execute(f'DELETE FROM "{dim}" WHERE dataset_code = ?', [dataset_code])
+            con.execute(
+                f'INSERT INTO "{dim}" ({insert_cols}) '
+                f'SELECT DISTINCT ?, {member_sql} FROM "{table}"',
+                [dataset_code],
+            )
 
         # Drop the now-redundant attribute columns from the fact table.
         for col in others:
@@ -408,7 +570,7 @@ def extract_dimensions(con, table: str, dataset_code: str, norm_cols: list[str])
 
 
 def extract_constant_columns(
-    con, table: str, dataset_code: str, protect: tuple[str, ...] = ("value",)
+    con, table: str, dataset_code: str, protect: tuple[str, ...] = ("value", "year")
 ) -> None:
     """Drop columns that hold a single value across *every* row of ``table``.
 
@@ -418,8 +580,12 @@ def extract_constant_columns(
     from the metadata. The check scans the whole table (not a sample): a column is
     only dropped if it is genuinely constant everywhere.
 
-    The ``value`` column is protected by default so a fact table always keeps its
-    measurement column, even in the degenerate case where every value is equal.
+    ``value`` and ``year`` are protected by default. ``value`` keeps a fact table's
+    measurement column even in the degenerate case where every value is equal.
+    ``year`` is the temporal key: a single-year build (``--years 2017``) makes it
+    constant, but dropping it would leave no year column to merge on when a later
+    ``--years 2018`` build accumulates into the same database (see
+    :func:`import_csv`), so we always keep it in the fact table.
     """
     con.execute(DDL_FAOSTAT_CONSTANT_COLUMN)
 

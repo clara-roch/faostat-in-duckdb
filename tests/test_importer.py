@@ -246,13 +246,10 @@ def test_year_filter_keeps_only_selected_years(con, tmp_path):
     assert result.source_row_count == 8
     # ...and a filtered subset is reported lossless (no matching row dropped).
     assert result.lossless
-    # Only 2000 survived: the year column is now constant across the subset, so it
-    # is losslessly lifted into faostat_constant_column with value 2000.
-    (year_const,) = con.execute(
-        "SELECT value FROM faostat_constant_column "
-        "WHERE dataset_code = 'QCL' AND column_name = 'year'"
-    ).fetchone()
-    assert year_const == "2000"
+    # year is protected from constant-column removal (so a later --years build can
+    # merge on it), so it stays a real column even when the subset is one year.
+    years = {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()}
+    assert years == {2000}
 
 
 def test_year_filter_range_selects_all_matching(con, tmp_path):
@@ -276,6 +273,85 @@ NO_YEAR_CSV = """\
 "2","Afghanistan","15","Wheat","3200","A"
 "68","France","15","Wheat","37000","A"
 """
+
+# A three-year dataset used to exercise accumulate-across-builds. France gains a
+# new item (Barley) in 2002 so a new dimension member must be merged in too.
+MULTI_YEAR_CSV = """\
+"Domain Code","Domain","Area Code","Area Code (M49)","Area","Item Code","Item","Element Code","Element","Year Code","Year","Unit","Value","Flag"
+"QCL","Crops","2","'004","Afghanistan","15","Wheat","5510","Production","2000","2000","t","3200","A"
+"QCL","Crops","68","'250","France","15","Wheat","5510","Production","2000","2000","t","37000","A"
+"QCL","Crops","2","'004","Afghanistan","15","Wheat","5510","Production","2001","2001","t","3300","E"
+"QCL","Crops","68","'250","France","15","Wheat","5510","Production","2001","2001","t","36500","E"
+"QCL","Crops","68","'250","France","44","Barley","5510","Production","2002","2002","t","900","A"
+"""
+
+
+def _make_multi(tmp_path, code="QCL"):
+    archive = tmp_path / f"{code}.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{code}_E_All_Data.csv", MULTI_YEAR_CSV)
+        zf.writestr(f"{code}_E_Flags.csv", FLAG_CSV)
+    return archive
+
+
+def test_accumulate_years_across_builds_keeps_both(con, tmp_path):
+    # Build 2000, then 2001 into the SAME database: both years must end up present,
+    # and 2000 must not be reprocessed/lost.
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b1", years={2000})
+    assert {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()} == {2000}
+
+    result = importer_mod.import_archive(
+        con, _make_multi(tmp_path), "QCL", tmp_path / "b2", years={2001}
+    )
+    assert result.appended_rows == 2          # the two 2001 rows
+    assert result.row_count == 4              # 2 (2000) + 2 (2001) now in the table
+    assert result.year_filter == (2001,)
+    assert result.lossless
+    years = {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()}
+    assert years == {2000, 2001}
+
+
+def test_accumulate_merges_new_dimension_member(con, tmp_path):
+    # 2002 introduces Barley (item 44); accumulating it must add the new dim_item
+    # member without dropping Wheat from the earlier years.
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b1", years={2000})
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b2", years={2002})
+
+    items = {
+        r[0]
+        for r in con.execute(
+            "SELECT item_label FROM dim_item WHERE dataset_code = 'QCL'"
+        ).fetchall()
+    }
+    assert {"Wheat", "Barley"} <= items
+    # The labelled view resolves Barley (2002) and Wheat (2000) side by side.
+    rows = con.execute(
+        "SELECT year, item_label, value FROM view_qcl_labelled ORDER BY year, value"
+    ).fetchall()
+    assert (2000, "Wheat", 3200) in rows
+    assert (2002, "Barley", 900) in rows
+
+
+def test_accumulate_same_year_is_idempotent(con, tmp_path):
+    # Re-running a year that is already present refreshes it rather than duplicating.
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b1", years={2000})
+    first = con.execute("SELECT COUNT(*) FROM data_qcl").fetchone()[0]
+    result = importer_mod.import_archive(
+        con, _make_multi(tmp_path), "QCL", tmp_path / "b2", years={2000}
+    )
+    assert result.appended_rows == 2
+    assert con.execute("SELECT COUNT(*) FROM data_qcl").fetchone()[0] == first  # no dupes
+
+
+def test_full_build_replaces_not_accumulates(con, tmp_path):
+    # A build WITHOUT a year filter is a full rebuild: it replaces the dataset even
+    # if a table already exists (accumulation is a year-slicing feature only).
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b1", years={2000})
+    result = importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b2")
+    assert result.appended_rows is None
+    assert result.row_count == 5  # the whole 3-year dataset
+    years = {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()}
+    assert years == {2000, 2001, 2002}
 
 
 def test_year_filter_ignored_when_no_year_column(con, tmp_path):
