@@ -17,13 +17,14 @@ Choose one of these installation methods:
 ### With `python3 -m pip`
 
 ```bash
-python3 -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
+python -m pip install "faostatdb[ui] @ git+https://github.com/clara-roch/faostat-in-duckdb.git"
+
 ```
 
 ### With `pipx`
 
 ```bash
-pipx install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
+pipx install "git+https://github.com/clara-roch/faostat-in-duckdb.git#egg=faostatdb[ui]"
 ```
 
 The optional `[ui]` extra only adds nicer progress output.
