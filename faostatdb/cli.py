@@ -587,6 +587,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
     if failed:
         print(f"{len(failed)} dataset(s) failed: {', '.join(failed)}", file=sys.stderr)
         return 1 if strict else 0
+    if not cfg.build.keep_archives:
+        paths_mod.clean_cache(download_dir, remove_dir=True)
     return 0
 
 

@@ -10,12 +10,14 @@ FAOSTATdb downloads FAOSTAT bulk ZIP archives, validates them, and imports each 
 
 ## Install
 
+The only prerequisite you need to install yourself is Python >= 3.11. All Python package dependencies, including `duckdb`, are installed automatically by `pip`.
+
 Choose one of these installation methods:
 
-### With `python -m pip`
+### With `python3 -m pip`
 
 ```bash
-python -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
+python3 -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
 ```
 
 ### With `pipx`
@@ -24,7 +26,7 @@ python -m pip install "git+https://github.com/clara-roch/faostatdb.git#egg=faost
 pipx install "git+https://github.com/clara-roch/faostatdb.git#egg=faostatdb[ui]"
 ```
 
-You do not need to install `duckdb` yourself. The optional `[ui]` extra only adds nicer progress output and better cache-directory defaults.
+The optional `[ui]` extra only adds nicer progress output.
 
 ## Quick start
 
@@ -70,7 +72,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 
 | Flag                                       | Effect                                                                                                                                                                                                                                        |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                                                             |
+| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                        |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                      |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                               |
 | `--years 2000-2010,2020`                   | Keep **only** rows for these year(s) (single years, comma lists and inclusive `lo-hi` ranges). The whole archive is still downloaded (FAOSTAT ships all years in one ZIP); non-matching rows are dropped at import. Datasets with no year column import in full. Overrides `build.years`. |
