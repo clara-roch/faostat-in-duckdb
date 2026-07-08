@@ -19,8 +19,8 @@ def test_explicit_wins(tmp_path):
 
 
 def test_keep_archives_uses_project_local(tmp_path, monkeypatch):
-    # Must be hermetic: a developer machine (or this repo's secrets.env) may set
-    # FAOSTATDB_DOWNLOAD_DIR in the real environment, which would otherwise win.
+    # Must be hermetic: a developer machine may set FAOSTATDB_DOWNLOAD_DIR in the
+    # real environment, which would otherwise win.
     monkeypatch.delenv(ENV_DOWNLOAD_DIR, raising=False)
     out = resolve_download_dir(None, keep_archives=True, cwd=tmp_path)
     assert out == tmp_path / PROJECT_LOCAL_DIRNAME

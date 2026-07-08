@@ -36,7 +36,7 @@ The Python package does not exist yet; build it per [PLAN.md](PLAN.md) starting 
 - Install for development: `pip install -e ".[ui]"` (or `uv pip install -e ".[ui]"`)
 - Run without installing: `python -m faostatdb ...`
 - Run tests: `pytest`
-- CLI surface: `faostatdb list`, `tables`, `config init|show`, `build` (`--include` / `--exclude` / `--jobs` / `--keep-archives` / `--download-dir` / `--yes` / `--strict` / `--enrich-areas` / `--no-enrich-areas` / `--enrich-history` / `--no-enrich-history` / `--keep-raw-tables` / `--no-compact`), `info`, `validate`, `clean-cache`, `sql`, `self-contained`, and `bench` (`--include` / `--jobs-list`).
+- CLI surface: `faostatdb list`, `tables`, `config init|show`, `build` (`--include` / `--exclude` / `--years` / `--jobs` / `--keep-archives` / `--download-dir` / `--yes` / `--strict` / `--enrich-areas` / `--no-enrich-areas` / `--enrich-history` / `--no-enrich-history` / `--keep-raw-tables` / `--no-compact`), `info`, `validate`, `clean-cache`, `sql`, `self-contained`, and `bench` (`--include` / `--jobs-list`).
 
 CI runs the test suite on a Linux/macOS/Windows matrix; keep CI tests small and deterministic — never trigger a full FAOSTAT download in CI.
 

@@ -18,7 +18,6 @@ MAIN = (
 
 def test_config_init_writes_and_respects_force(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FAOSTATDB_DATABASE", raising=False)
 
     assert main(["config", "init"]) == 0
     cfg_file = tmp_path / "faostatdb.toml"

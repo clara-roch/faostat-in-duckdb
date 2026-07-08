@@ -3,7 +3,7 @@ Command-line interface: argument parsing and command dispatch.
 
 Commands: ``list``, ``tables``, ``config show|init``, ``build``, ``info``,
 ``validate``, ``clean-cache``, ``sql``, ``self-contained`` and ``bench``. The CLI
-resolves configuration (``faostatdb.toml`` < ``secrets.env`` env vars < flags),
+resolves configuration (built-in defaults < ``./faostatdb.toml`` < CLI flags),
 then delegates to the relevant modules.
 
 Read the module top-to-bottom as the pipeline: :func:`main` parses args and
@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--include", default=None, help="comma-separated codes to include")
     p_build.add_argument("--exclude", default=None, help="comma-separated codes to exclude")
     p_build.add_argument("--jobs", type=int, default=None, help="parallel download jobs")
+    p_build.add_argument(
+        "--years",
+        default=None,
+        help="only import rows for these year(s), e.g. '2010', '2000,2005,2010' "
+        "or '1990-1995,2020' (the whole archive is still downloaded)",
+    )
     p_build.add_argument("--keep-archives", action="store_true", help="keep ZIPs after build")
     p_build.add_argument(
         "--no-keep-archives",
@@ -290,6 +296,12 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
         print("no datasets selected", file=sys.stderr)
         return 1
 
+    try:
+        years = config_mod.parse_years(cfg.build.years)
+    except ValueError as exc:
+        print(f"invalid years filter: {exc}", file=sys.stderr)
+        return 2
+
     if not assume_yes and not _confirm(selected, cfg):
         print("aborted", file=sys.stderr)
         return 1
@@ -302,6 +314,11 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
         f"building {cfg.build.database} from {len(selected)} dataset(s) "
         f"(archives cached in {download_dir}, {jobs} download job(s))"
     )
+    if years:
+        reporter.log(
+            f"year filter active: keeping only rows for year(s) {cfg.build.years} "
+            f"({len(years)} year(s)); datasets without a year column import in full"
+        )
 
     manifest = download_mod.Manifest(paths_mod.manifest_path(download_dir))
 
@@ -473,7 +490,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
             )
             try:
                 imp = importer_mod.import_archive(
-                    con, archive, rec.code, build_dir, keep_raw=cfg.build.keep_raw_tables
+                    con, archive, rec.code, build_dir,
+                    keep_raw=cfg.build.keep_raw_tables, years=years,
                 )
             except Exception as exc:  # noqa: BLE001 — recorded per-dataset
                 failed.append(rec.code)
@@ -906,6 +924,17 @@ def _check_row_count(rec, imp, reporter) -> bool:
     the build under ``--strict``. A disagreement with only the metadata is reported
     as a plainly-labelled note so it can't be mistaken for data loss.
     """
+    if imp.year_filter is not None:
+        # Intentional subset: the imported rows are those matching the year filter,
+        # so they are expected to be fewer than the full delivered CSV. Report the
+        # kept/total split plainly so it can't be mistaken for data loss.
+        reporter.log(
+            f"note: {rec.code} filtered to year(s) "
+            f"{','.join(str(y) for y in imp.year_filter)}: kept {imp.row_count:,} "
+            f"of {imp.source_row_count:,} source record(s)"
+        )
+        return True
+
     if not imp.lossless:
         reporter.event(
             rec.code, "import", "invalid",
@@ -1049,6 +1078,8 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
         build = replace(build, compact=False)
     if args.keep_raw_tables:
         build = replace(build, keep_raw_tables=True)
+    if args.years is not None:
+        build = replace(build, years=args.years)
 
     # Enrichment is on by default (see EnrichmentConfig); the --enrich-* flags are
     # kept for explicitness while the --no-enrich-* flags opt back out. When both a

@@ -1,12 +1,13 @@
 """Config merge / selection tests (offline, deterministic)."""
 
+import pytest
+
 from faostatdb.config import (
     Config,
-    apply_env_overrides,
     default_config,
     load_config,
-    load_dotenv,
     merge_config,
+    parse_years,
 )
 from faostatdb.metadata import DatasetRecord, select_datasets
 
@@ -31,50 +32,44 @@ def test_merge_ignores_unknown_keys():
     assert isinstance(merged, Config)
 
 
-def test_env_overrides_typed_values():
-    env = {
-        "FAOSTATDB_DATABASE": "food.duckdb",
-        "FAOSTATDB_JOBS": "12",
-        "FAOSTATDB_KEEP_ARCHIVES": "true",
-        "FAOSTATDB_DATASETS_MODE": "include",
-        "FAOSTATDB_DATASETS_INCLUDE": "QCL, FBS",
-    }
-    cfg = apply_env_overrides(default_config(), env)
-    assert cfg.build.database == "food.duckdb"
-    assert cfg.build.jobs == 12
-    assert cfg.build.keep_archives is True
-    assert cfg.build.overwrite is False  # untouched
+def test_load_config_uses_defaults_when_no_local_toml(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # empty dir: no faostatdb.toml
+    assert load_config() == default_config()
+
+
+def test_local_toml_overrides_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "faostatdb.toml").write_text(
+        "[build]\n"
+        "jobs = 9\n"
+        "database = \"fromfile.duckdb\"\n"
+        "\n"
+        "[datasets]\n"
+        'mode = "include"\n'
+        'include = ["QCL", "FBS"]\n',
+        encoding="utf-8",
+    )
+    cfg = load_config()  # picks up ./faostatdb.toml over built-in defaults
+    assert cfg.build.jobs == 9
+    assert cfg.build.database == "fromfile.duckdb"
+    assert cfg.build.overwrite is False  # unspecified key: falls back to default
     assert cfg.datasets.mode == "include"
     assert cfg.datasets.include == ["QCL", "FBS"]
 
 
-def test_env_overrides_empty_is_noop():
-    cfg = apply_env_overrides(default_config(), {})
-    assert cfg == default_config()
+def test_cli_flags_override_local_toml(tmp_path, monkeypatch):
+    from faostatdb import cli
 
-
-def test_load_dotenv_sets_environ_without_clobbering(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FAOSTATDB_JOBS", raising=False)
-    monkeypatch.setenv("FAOSTATDB_DATABASE", "shell.duckdb")  # already set: must win
-    (tmp_path / "secrets.env").write_text(
-        "# a comment\n"
-        "FAOSTATDB_JOBS=9\n"
-        'FAOSTATDB_DATASETS_EXCLUDE="FA, CBH"\n'
-        "FAOSTATDB_DATABASE=fromfile.duckdb\n",
-        encoding="utf-8",
+    (tmp_path / "faostatdb.toml").write_text(
+        "[build]\njobs = 9\n", encoding="utf-8"
     )
-    loaded = load_dotenv()
-    assert loaded["FAOSTATDB_JOBS"] == "9"
-    assert "FAOSTATDB_DATABASE" not in loaded  # not clobbered
-    import os
-
-    assert os.environ["FAOSTATDB_DATABASE"] == "shell.duckdb"
-
-    cfg = load_config()  # no faostatdb.toml in tmp_path -> built-in defaults + env
-    assert cfg.build.jobs == 9
-    assert cfg.build.database == "shell.duckdb"
-    assert cfg.datasets.exclude == ["FA", "CBH"]
+    cfg = load_config()
+    assert cfg.build.jobs == 9  # local TOML beats the built-in default
+    # A CLI flag then beats the local TOML.
+    args = cli.build_parser().parse_args(["build", "--jobs", "3"])
+    merged = cli._apply_build_overrides(args, cfg)
+    assert merged.build.jobs == 3
 
 
 def _records(*codes: str) -> list[DatasetRecord]:
@@ -119,11 +114,15 @@ def test_default_toml_renders_enrichment_true():
     assert "historical_validity = true" in toml
 
 
-def test_env_can_disable_enrichment():
-    cfg = apply_env_overrides(
-        default_config(),
-        {"FAOSTATDB_ENRICH_AREAS": "false", "FAOSTATDB_ENRICH_HISTORY": "false"},
+def test_local_toml_can_disable_enrichment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "faostatdb.toml").write_text(
+        "[enrichment]\n"
+        "area_classification = false\n"
+        "historical_validity = false\n",
+        encoding="utf-8",
     )
+    cfg = load_config()
     assert cfg.enrichment.area_classification is False
     assert cfg.enrichment.historical_validity is False
 
@@ -160,3 +159,60 @@ def test_negation_wins_over_positive_flag():
         _build_args(["--enrich-areas", "--no-enrich-areas"]), default_config()
     )
     assert cfg.enrichment.area_classification is False
+
+
+# --- year filter parsing ----------------------------------------------------
+
+
+def test_parse_years_none_when_empty():
+    assert parse_years("") is None
+    assert parse_years("   ") is None
+    assert parse_years(None) is None
+
+
+def test_parse_years_single_and_list():
+    assert parse_years("2010") == {2010}
+    assert parse_years("2000,2005,2010") == {2000, 2005, 2010}
+    # Whitespace and empty tokens are tolerated.
+    assert parse_years(" 2000 , 2001 ,") == {2000, 2001}
+
+
+def test_parse_years_inclusive_ranges():
+    assert parse_years("1990-1992") == {1990, 1991, 1992}
+    assert parse_years("1990-1992,2000") == {1990, 1991, 1992, 2000}
+
+
+@pytest.mark.parametrize("spec", ["abc", "2000-", "20x0", "2010-2000", "0", "10000"])
+def test_parse_years_rejects_bad_specs(spec):
+    with pytest.raises(ValueError):
+        parse_years(spec)
+
+
+def test_default_years_is_all():
+    assert default_config().build.years == ""
+
+
+def test_years_flag_overrides_config():
+    from faostatdb import cli
+
+    cfg = cli._apply_build_overrides(_build_args(["--years", "2000-2010"]), default_config())
+    assert cfg.build.years == "2000-2010"
+    assert parse_years(cfg.build.years) == set(range(2000, 2011))
+
+
+def test_years_toml_renders_and_roundtrips():
+    from faostatdb.config import config_to_toml
+
+    toml = config_to_toml(replace_years(default_config(), "2000,2010"))
+    assert 'years = "2000,2010"' in toml
+
+
+def replace_years(cfg, years):
+    from dataclasses import replace
+
+    return Config(
+        build=replace(cfg.build, years=years),
+        datasets=cfg.datasets,
+        performance=cfg.performance,
+        enrichment=cfg.enrichment,
+    )

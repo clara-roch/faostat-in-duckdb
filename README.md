@@ -49,8 +49,8 @@ By default, downloaded archives are **deleted after a successful build** (`keep_
 | `faostatdb tables`                          | Opens a built database read-only and lists every table with an estimated row count.                                                                                                                                                              |
 | `faostatdb info`                            | Prints a **reproducibility summary** of a built database: size, dataset count, build timestamp, metadata SHA256, and tool/DuckDB/Python versions.                                                                                                |
 | `faostatdb validate`                        | Opens a built database read-only and checks that every `data_<code>` fact table exists and is queryable (non-empty). Exits non-zero on problems.                                                                                                 |
-| `faostatdb config show`                     | Prints the **effective** configuration as TOML (committed defaults after `secrets.env` env vars are merged).                                                                                                                                     |
-| `faostatdb config init`                     | Writes a default `faostatdb.toml` into the current directory (`--force` to overwrite).                                                                                                                                                           |
+| `faostatdb config show`                     | Prints the **effective** configuration as TOML (built-in defaults merged with a local `./faostatdb.toml`, if present).                                                                                                                           |
+| `faostatdb config init`                     | Writes a `faostatdb.toml` into the current directory for you to edit (`--force` to overwrite).                                                                                                                                                   |
 | `faostatdb clean-cache`                     | Deletes cached archives (`*.zip`/`*.part`) and the download manifest from the download directory, and reports how much was freed.                                                                                                                |
 | `faostatdb sql "<query>"`                   | Runs one SQL query against a built database (read-only) and prints an aligned text table — a convenience wrapper, no pandas required.                                                                                                            |
 | `faostatdb self-contained -o faostatdb.pyz` | Bundles the package into a single executable `.pyz` (stdlib `zipapp`) you can drop in `~/.local/bin`. Run it with `python faostatdb.pyz build …`.                                                                                                |
@@ -60,6 +60,7 @@ By default, downloaded archives are **deleted after a successful build** (`keep_
 
 ```bash
 faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
+                [--years 2000-2010,2020] \
                 [--jobs N] [--keep-archives | --no-keep-archives] \
                 [--download-dir DIR] [--yes] [--strict] \
                 [--no-compact] [--keep-raw-tables] \
@@ -72,6 +73,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 | `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                                                             |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                      |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                               |
+| `--years 2000-2010,2020`                   | Keep **only** rows for these year(s) (single years, comma lists and inclusive `lo-hi` ranges). The whole archive is still downloaded (FAOSTAT ships all years in one ZIP); non-matching rows are dropped at import. Datasets with no year column import in full. Overrides `build.years`. |
 | `--jobs N`                                 | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`).                                                                                                                                                         |
 | `--keep-archives` / `--no-keep-archives`   | Force keeping / deleting the cached `*.zip` after a successful build. Default: **delete** on success (`keep_archives = false`); hot restart still reuses them after a failure.                                                                |
 | `--download-dir DIR`                       | Where raw archives are cached (overrides `build.download_dir`).                                                                                                                                                                               |
@@ -433,14 +435,25 @@ DataFrame(DBInterface.execute(con, "SELECT * FROM data_qcl LIMIT 10"))
 
 ## Configuration
 
-Configuration comes from two files by design:
+You don't need to clone this repository to configure `faostatdb`. Install the package, then run it from the directory where you want to build and use your database. Configuration resolves in three layers, lowest precedence first:
 
-- [`faostatdb.toml`](faostatdb.toml) — **committed**. The general default shape everyone gets on clone. **Don't edit it** for personal/machine settings.
-- [`secrets.env`](secrets.env) — **git-ignored**, yours. A `KEY=value`-per-line file overriding whatever you need. Loaded automatically at startup; values already set in your shell win over it.
+**built-in defaults → `./faostatdb.toml` (your launch directory) → CLI flags**
 
-Resolution order, lowest precedence first: `faostatdb.toml` → `secrets.env` env vars → CLI flags. So to change a value, add a line to `secrets.env` (or run `faostatdb config init` to scaffold your own TOML).
+- **Built-in defaults** ship with the package — with no config file and no flags, you get the shape shown below.
+- **CLI flags** override a value for a single run (e.g. `--jobs 4`, `--include QCL,FBS`, `--no-enrich-areas`).
+- **A `faostatdb.toml` in the directory you launch `faostatdb` from** persists settings across runs. Create one with:
 
-### The committed defaults
+  ```console
+  faostatdb config init      # writes ./faostatdb.toml, then edit it
+  ```
+
+  Edit that local file to change your persistent settings. `faostatdb config show` prints the effective configuration after merging defaults with your local file.
+
+> The [`faostatdb.toml`](faostatdb.toml) committed to this repository is only the package's example/default configuration, used during development. End users don't edit or depend on it — your own `config init` copy uses the identical schema.
+
+### The default configuration
+
+`config init` writes this (the built-in defaults); edit the values you want to persist:
 
 ```toml
 [build]
@@ -466,30 +479,7 @@ area_classification = true    # non-source curated is_country flag from area_cla
 historical_validity = true    # fill valid_from/valid_to for former areas (implies area_classification; false / --no-enrich-history to skip)
 ```
 
-### Overriding via `secrets.env`
-
-Each value maps to an environment variable; set only the ones you want to change.
-
-```dotenv
-FAOSTATDB_DATABASE_DIR=C:\where\it\is\stored  # optional: redirect a bare-filename DB to this dir (default: project-local)
-
-FAOSTATDB_DATABASE=faostat.duckdb
-FAOSTATDB_DOWNLOAD_DIR=faostat_temp_download
-FAOSTATDB_KEEP_ARCHIVES=false
-FAOSTATDB_JOBS=0
-FAOSTATDB_OVERWRITE=false
-FAOSTATDB_COMPACT=true
-FAOSTATDB_KEEP_RAW_TABLES=false
-FAOSTATDB_DATASETS_MODE=include            # all | include | exclude
-FAOSTATDB_DATASETS_INCLUDE=QCL,FBS         # comma-separated
-FAOSTATDB_DATASETS_EXCLUDE=FA,CBH          # comma-separated
-FAOSTATDB_IMPORT_THREADS=0
-FAOSTATDB_MEMORY_LIMIT=8GB
-FAOSTATDB_ENRICH_AREAS=true                # false to skip the area classification
-FAOSTATDB_ENRICH_HISTORY=true              # false to skip the historical-validity fill
-```
-
-Booleans accept `true`/`false`/`1`/`0`/`yes`/`no`; lists are comma-separated. Run `faostatdb config show` to print the effective configuration after merging.
+Every key above has a matching CLI flag on `faostatdb build` (see the flags table) for one-off overrides. To change the output location, either set `database` to an absolute path, or set the `FAOSTATDB_DATABASE_DIR` environment variable to redirect a bare-filename database to another directory — see [Where files are stored](#where-files-are-stored).
 
 ## Reproducibility
 

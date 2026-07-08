@@ -150,10 +150,23 @@ class ImportResult:
     count_method: str = "line-count"
     labelled_view: str | None = None
     flag_rows: int = 0
+    #: Sorted years the import was filtered to, or ``None`` for a full import.
+    #: When set, ``row_count`` is an intentional subset of ``source_row_count``
+    #: (the full delivered CSV), so the two are not expected to agree.
+    year_filter: tuple[int, ...] | None = None
 
     @property
     def lossless(self) -> bool:
-        """True when DuckDB loaded exactly as many rows as the source CSV holds."""
+        """True when the import kept every row it was meant to.
+
+        For a full import that means DuckDB loaded exactly as many rows as the
+        delivered CSV holds. For a year-filtered import the row count is a
+        deliberate subset of the source, so full-CSV equality is not expected —
+        losslessness there is scoped to "no matching row was dropped", which the
+        deterministic ``WHERE`` guarantees, so we report it as lossless.
+        """
+        if self.year_filter is not None:
+            return True
         return self.row_count == self.source_row_count
 
 
@@ -220,8 +233,25 @@ def read_csv_header(con, csv_path: Path, encoding: str = "utf-8") -> list[str]:
 _AUTO_TYPE_CANDIDATES = "['INTEGER', 'BIGINT', 'DOUBLE', 'VARCHAR']"
 
 
+def _year_where_clause(raw_cols: list[str], norm_cols: list[str], years: set[int]) -> str | None:
+    """Build a ``WHERE`` filtering ``read_csv`` output to ``years`` on the year column.
+
+    Returns the SQL fragment (referencing the *raw* header, which is what
+    ``read_csv`` exposes) or ``None`` when the dataset has no ``year`` column —
+    the caller then imports the dataset in full. The comparison uses ``TRY_CAST``
+    so a non-integer period label (e.g. a "2019-2021" three-year period) yields
+    ``NULL`` and is simply excluded rather than raising.
+    """
+    if "year" not in norm_cols:
+        return None
+    raw_year = raw_cols[norm_cols.index("year")]
+    in_list = ", ".join(str(y) for y in sorted(years))
+    return f'WHERE TRY_CAST("{raw_year}" AS BIGINT) IN ({in_list})'
+
+
 def import_csv(
-    con, csv_path: Path, dataset_code: str, *, keep_raw: bool = False
+    con, csv_path: Path, dataset_code: str, *, keep_raw: bool = False,
+    years: set[int] | None = None,
 ) -> ImportResult:
     """Create ``data_<code>`` from ``csv_path`` with normalized column names.
 
@@ -256,6 +286,13 @@ def import_csv(
     raw_cols = read_csv_header(con, csv_path, encoding)
     norm_cols = normalize_columns(raw_cols)
 
+    # Optional year filter: FAOSTAT ships every year in one bulk archive, so the
+    # whole file is already on disk; here we keep only the requested years' rows.
+    # A dataset without a ``year`` column can't be filtered, so it imports in full
+    # (year_filter stays None and normal full-CSV losslessness still applies).
+    where = _year_where_clause(raw_cols, norm_cols, years) if years else None
+    applied_years = tuple(sorted(years)) if (years and where) else None
+
     # Project every source column through "Raw Name" AS snake_name so no column is
     # dropped and no value/flag is changed at load time.
     projection = ", ".join(
@@ -267,7 +304,8 @@ def import_csv(
             f'CREATE TABLE "{table}" AS '
             f"SELECT {projection} "
             f"FROM read_csv(?, header=true, encoding='{encoding}', "
-            f"sample_size=-1, auto_type_candidates={_AUTO_TYPE_CANDIDATES})",
+            f"sample_size=-1, auto_type_candidates={_AUTO_TYPE_CANDIDATES}) "
+            f"{where or ''}",
             [str(csv_path)],
         )
     except Exception as exc:  # noqa: BLE001 — re-raised with import context
@@ -282,7 +320,13 @@ def import_csv(
     # Verify losslessness against the delivered CSV itself — counted independently
     # of DuckDB — rather than the approximate FileRows metadata. Dimension/constant
     # reduction below only drops columns, never rows, so this count stays valid.
-    source_rows, method = count_source_rows(csv_path, encoding, count)
+    # With a year filter the imported rows are an intentional subset, so we record
+    # the full-file record count for provenance but don't expect it to match (the
+    # cheap line count is exact here bar rare multi-line quoted fields).
+    if applied_years is None:
+        source_rows, method = count_source_rows(csv_path, encoding, count)
+    else:
+        source_rows, method = count_physical_data_rows(csv_path), "line-count"
 
     # Keep an untouched copy *before* any reduction, for debugging losslessness.
     # (Kept before the apostrophe strip too, so raw_<code> shows the source verbatim.)
@@ -304,6 +348,7 @@ def import_csv(
         row_count=count,
         source_row_count=source_rows,
         count_method=method,
+        year_filter=applied_years,
     )
 
 
@@ -557,16 +602,19 @@ def _first_index(seq, pred) -> int | None:
 
 
 def import_archive(
-    con, archive: Path, dataset_code: str, build_dir: Path, *, keep_raw: bool = False
+    con, archive: Path, dataset_code: str, build_dir: Path, *, keep_raw: bool = False,
+    years: set[int] | None = None,
 ) -> ImportResult:
     """Extract + import one archive, then build flag dim + labelled view.
 
     Cleans up the extracted main CSV afterwards. The order matters: flags are
     loaded before the labelled view so the view can join flag descriptions.
+    ``years`` optionally restricts the fact table to those years (see
+    :func:`import_csv`).
     """
     csv_path = extract_main_csv(archive, build_dir)
     try:
-        result = import_csv(con, csv_path, dataset_code, keep_raw=keep_raw)
+        result = import_csv(con, csv_path, dataset_code, keep_raw=keep_raw, years=years)
     finally:
         csv_path.unlink(missing_ok=True)
 

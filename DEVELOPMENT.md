@@ -22,7 +22,7 @@ Everything starts at the CLI and flows through the modules below. The entry poin
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`cli.py`](faostatdb/cli.py)           | Parses arguments, dispatches every command, and orchestrates the build (select → confirm → download → validate → import → enrich → record → compact).                                                          |
 | [`__main__.py`](faostatdb/__main__.py) | Lets you run the tool with `python -m faostatdb`.                                                                                                                                                              |
-| [`config.py`](faostatdb/config.py)     | Loads `faostatdb.toml` (stdlib `tomllib`), applies `secrets.env` env-var overrides, powers `config show`/`init`. Precedence: TOML \< `secrets.env` \< CLI flags.                                               |
+| [`config.py`](faostatdb/config.py)     | Loads a launch-directory `faostatdb.toml` (stdlib `tomllib`) over built-in defaults, powers `config show`/`init`. Precedence: built-in defaults \< `./faostatdb.toml` \< CLI flags.                            |
 | [`metadata.py`](faostatdb/metadata.py) | Fetches + parses `datasets_E.json`, hashes it for reproducibility, keeps every field (incl. the raw entry JSON), and applies `all`/`include`/`exclude` selection.                                              |
 | [`paths.py`](faostatdb/paths.py)       | Resolves where archives are cached and where the output database is written.                                                                                                                                   |
 | [`download.py`](faostatdb/download.py) | Parallel download with retry/backoff, the hot-restart **manifest** state machine, and `*.part` → atomic rename.                                                                                                |
@@ -36,7 +36,7 @@ Everything starts at the CLI and flows through the modules below. The entry poin
 
 ### Order of calls during `faostatdb build`
 
-1. **Configure** — `config.load_config()` merges TOML \< `secrets.env` \< CLI flags.
+1. **Configure** — `config.load_config()` merges built-in defaults \< `./faostatdb.toml` \< CLI flags.
 2. **Select** — `metadata.fetch_and_parse()` + `metadata.select_datasets()`.
 3. **Confirm** — unless `--yes`, print an estimated-size summary and prompt (refuse non-interactively without `--yes`).
 4. **Resolve paths** — `paths.resolve_download_dir()` + `paths.manifest_path()`.

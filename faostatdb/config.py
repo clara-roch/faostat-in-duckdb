@@ -1,22 +1,22 @@
 """
-Configuration: load the shipped ``faostatdb.toml``, then apply ``secrets.env``.
+Configuration: built-in defaults overlaid by a launch-directory ``faostatdb.toml``.
 
-The repository ships a single ``faostatdb.toml`` holding the general, default
-configuration — that is what people get when they clone the project. It is meant
-to be committed and left alone. Machine-specific or personal overrides go in a
-git-ignored ``secrets.env`` (a simple ``KEY=value`` file) instead of editing the
-TOML, so the shared defaults stay clean and pull-able.
+Configuration is deliberately simple. The package ships built-in defaults (this
+module). To persist settings, a user runs ``faostatdb config init`` to write a
+``faostatdb.toml`` into the directory they launch ``faostatdb`` from, then edits
+it. CLI flags override individual values for one-off runs.
 
 Resolution order (lowest precedence first):
 
-1. Built-in defaults (this module) — a safety net if ``faostatdb.toml`` is absent.
-2. ``faostatdb.toml`` in the current working directory (the shipped defaults).
-3. Environment variables, loaded from ``secrets.env`` if present (see
-   :data:`apply_env_overrides`).
-4. CLI flags (applied later in :mod:`faostatdb.cli`).
+1. Built-in defaults (this module).
+2. ``faostatdb.toml`` in the current working directory (the launch directory).
+3. CLI flags (applied later in :mod:`faostatdb.cli`).
 
-Config is parsed with the stdlib ``tomllib`` and ``secrets.env`` with a tiny
-hand-rolled reader — no external dependencies.
+The ``faostatdb.toml`` committed to the repository is only the package's
+example/default configuration used during development — end users neither clone
+the repo nor edit that file; they use their own launch-directory copy.
+
+Config is parsed with the stdlib ``tomllib`` — no external dependencies.
 """
 
 from __future__ import annotations
@@ -28,26 +28,6 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_FILENAME = "faostatdb.toml"
-SECRETS_FILENAME = "secrets.env"
-
-# Environment-variable names that override individual config values. These are
-# what users set in their own ``secrets.env``. ``FAOSTATDB_DATABASE_DIR`` and
-# ``FAOSTATDB_DOWNLOAD_DIR`` (consumed in faostatdb.paths) point at directories;
-# the variables below override values inside ``faostatdb.toml``.
-ENV_DATABASE = "FAOSTATDB_DATABASE"
-ENV_DOWNLOAD_DIR = "FAOSTATDB_DOWNLOAD_DIR"
-ENV_KEEP_ARCHIVES = "FAOSTATDB_KEEP_ARCHIVES"
-ENV_JOBS = "FAOSTATDB_JOBS"
-ENV_OVERWRITE = "FAOSTATDB_OVERWRITE"
-ENV_COMPACT = "FAOSTATDB_COMPACT"
-ENV_KEEP_RAW_TABLES = "FAOSTATDB_KEEP_RAW_TABLES"
-ENV_DATASETS_MODE = "FAOSTATDB_DATASETS_MODE"
-ENV_DATASETS_INCLUDE = "FAOSTATDB_DATASETS_INCLUDE"
-ENV_DATASETS_EXCLUDE = "FAOSTATDB_DATASETS_EXCLUDE"
-ENV_IMPORT_THREADS = "FAOSTATDB_IMPORT_THREADS"
-ENV_MEMORY_LIMIT = "FAOSTATDB_MEMORY_LIMIT"
-ENV_ENRICH_AREAS = "FAOSTATDB_ENRICH_AREAS"
-ENV_ENRICH_HISTORY = "FAOSTATDB_ENRICH_HISTORY"
 
 
 @dataclass(frozen=True)
@@ -69,6 +49,12 @@ class BuildConfig:
     compact: bool = True
     # Keep an untouched ``raw_<code>`` copy of each import for debugging.
     keep_raw_tables: bool = False
+    # Restrict imported rows to selected year(s). Empty == all years. A spec of
+    # comma-separated single years and inclusive ranges, e.g. "2010",
+    # "2000,2005,2010" or "1990-1995,2020". FAOSTAT ships every year in one bulk
+    # archive, so the whole ZIP is still downloaded; the filter drops non-matching
+    # rows at import time (see importer.import_csv). Parsed by parse_years.
+    years: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,6 +122,59 @@ def resolve_jobs(jobs: int) -> int:
     return auto_jobs() if jobs <= 0 else jobs
 
 
+def parse_years(spec: str | None) -> set[int] | None:
+    """Parse a ``[build] years`` / ``--years`` spec into a set of years.
+
+    Returns ``None`` when no filter is requested (empty / whitespace) so callers
+    can treat "all years" distinctly from "an empty selection". A spec is a
+    comma-separated list of single years and inclusive ``lo-hi`` ranges::
+
+        >>> sorted(parse_years("2010"))
+        [2010]
+        >>> sorted(parse_years("2000,2005,2010"))
+        [2000, 2005, 2010]
+        >>> sorted(parse_years("1990-1992,2000"))
+        [1990, 1991, 1992, 2000]
+        >>> parse_years("") is None
+        True
+
+    Raises :class:`ValueError` on a malformed token or an inverted range so a
+    typo fails the build up front rather than silently importing nothing.
+    """
+    if spec is None or not spec.strip():
+        return None
+    years: set[int] = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token.lstrip("-"):
+            # A range "lo-hi" (the lstrip guards against a leading sign so a bare
+            # negative year still reads as one malformed token, not a range).
+            lo_str, sep, hi_str = token.partition("-")
+            lo, hi = _parse_year(lo_str, spec), _parse_year(hi_str, spec)
+            if lo > hi:
+                raise ValueError(f"inverted year range {token!r} in {spec!r}")
+            years.update(range(lo, hi + 1))
+        else:
+            years.add(_parse_year(token, spec))
+    if not years:
+        raise ValueError(f"no years parsed from {spec!r}")
+    return years
+
+
+def _parse_year(text: str, spec: str) -> int:
+    """Parse one year token, bounding it to a plausible 1..9999 calendar year."""
+    text = text.strip()
+    try:
+        year = int(text)
+    except ValueError:
+        raise ValueError(f"invalid year {text!r} in {spec!r}") from None
+    if not 1 <= year <= 9999:
+        raise ValueError(f"year {year} out of range (1..9999) in {spec!r}")
+    return year
+
+
 def default_config() -> Config:
     """Return the built-in default configuration."""
     return Config()
@@ -148,27 +187,23 @@ def find_config_file(start: Path | None = None) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def load_config(path: Path | None = None, *, load_secrets: bool = True) -> Config:
+def load_config(path: Path | None = None) -> Config:
     """Load the effective configuration.
 
-    Starts from the built-in defaults, merges ``faostatdb.toml`` over them, then
-    applies any overriding environment variables. When ``load_secrets`` is true
-    (the default), values from a ``secrets.env`` in the cwd are loaded into the
-    environment first (without clobbering variables already set in the shell).
+    Starts from the built-in defaults and merges a launch-directory
+    ``faostatdb.toml`` over them. CLI flags are applied later, in
+    :mod:`faostatdb.cli`, on top of the returned config.
 
     A missing ``faostatdb.toml`` yields the built-in defaults. Unknown TOML keys
     are ignored so newer config files stay loadable by older tools.
     """
-    if load_secrets:
-        load_dotenv()
-
     cfg = default_config()
     cfg_path = path or find_config_file()
     if cfg_path is not None:
         with cfg_path.open("rb") as fh:
             raw = tomllib.load(fh)
         cfg = merge_config(cfg, raw)
-    return apply_env_overrides(cfg)
+    return cfg
 
 
 def merge_config(base: Config, raw: dict[str, Any]) -> Config:
@@ -192,115 +227,6 @@ def merge_config(base: Config, raw: dict[str, Any]) -> Config:
     )
 
 
-def apply_env_overrides(base: Config, env: dict[str, str] | None = None) -> Config:
-    """Override config values from environment variables (see module docstring).
-
-    Only variables that are actually set take effect; everything else falls
-    through to the TOML / built-in value.
-    """
-    src = os.environ if env is None else env
-
-    build_updates: dict[str, Any] = {}
-    if (v := src.get(ENV_DATABASE)) is not None:
-        build_updates["database"] = v
-    if (v := src.get(ENV_DOWNLOAD_DIR)) is not None:
-        build_updates["download_dir"] = v
-    if (v := src.get(ENV_KEEP_ARCHIVES)) is not None:
-        build_updates["keep_archives"] = _as_bool(v)
-    if (v := src.get(ENV_JOBS)) is not None:
-        build_updates["jobs"] = _as_int(v, base.build.jobs)
-    if (v := src.get(ENV_OVERWRITE)) is not None:
-        build_updates["overwrite"] = _as_bool(v)
-    if (v := src.get(ENV_COMPACT)) is not None:
-        build_updates["compact"] = _as_bool(v)
-    if (v := src.get(ENV_KEEP_RAW_TABLES)) is not None:
-        build_updates["keep_raw_tables"] = _as_bool(v)
-
-    datasets_updates: dict[str, Any] = {}
-    if (v := src.get(ENV_DATASETS_MODE)) is not None:
-        datasets_updates["mode"] = v
-    if (v := src.get(ENV_DATASETS_INCLUDE)) is not None:
-        datasets_updates["include"] = _as_list(v)
-    if (v := src.get(ENV_DATASETS_EXCLUDE)) is not None:
-        datasets_updates["exclude"] = _as_list(v)
-
-    perf_updates: dict[str, Any] = {}
-    if (v := src.get(ENV_IMPORT_THREADS)) is not None:
-        perf_updates["import_threads"] = _as_int(v, base.performance.import_threads)
-    if (v := src.get(ENV_MEMORY_LIMIT)) is not None:
-        perf_updates["memory_limit"] = v
-
-    enrich_updates: dict[str, Any] = {}
-    if (v := src.get(ENV_ENRICH_AREAS)) is not None:
-        enrich_updates["area_classification"] = _as_bool(v)
-    if (v := src.get(ENV_ENRICH_HISTORY)) is not None:
-        enrich_updates["historical_validity"] = _as_bool(v)
-
-    return Config(
-        build=replace(base.build, **build_updates) if build_updates else base.build,
-        datasets=(
-            replace(base.datasets, **datasets_updates)
-            if datasets_updates
-            else base.datasets
-        ),
-        performance=(
-            replace(base.performance, **perf_updates)
-            if perf_updates
-            else base.performance
-        ),
-        enrichment=(
-            replace(base.enrichment, **enrich_updates)
-            if enrich_updates
-            else base.enrichment
-        ),
-    )
-
-
-def load_dotenv(path: Path | None = None) -> dict[str, str]:
-    """Load a ``secrets.env`` file into ``os.environ`` and return what it set.
-
-    The format is one ``KEY=value`` per line; blank lines and ``#`` comments are
-    ignored, surrounding whitespace is trimmed, and matching single/double quotes
-    around the value are stripped. Variables already present in the environment
-    are *not* overwritten, so an explicit shell export always wins. A missing
-    file is a no-op.
-    """
-    target = path or (Path.cwd() / SECRETS_FILENAME)
-    if not target.is_file():
-        return {}
-
-    loaded: dict[str, str] = {}
-    for line in target.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        if not key or key in os.environ:
-            continue
-        os.environ[key] = value
-        loaded[key] = value
-    return loaded
-
-
-def _as_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _as_int(value: str, fallback: int) -> int:
-    try:
-        return int(value.strip())
-    except ValueError:
-        return fallback
-
-
-def _as_list(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
 def _field_names(cls: type) -> set[str]:
     return set(getattr(cls, "__dataclass_fields__", {}).keys())
 
@@ -322,6 +248,7 @@ def config_to_toml(cfg: Config) -> str:
         f"overwrite = {_b(cfg.build.overwrite)}\n"
         f"compact = {_b(cfg.build.compact)}\n"
         f"keep_raw_tables = {_b(cfg.build.keep_raw_tables)}\n"
+        f'years = "{cfg.build.years}"\n'
         "\n"
         "[datasets]\n"
         f'mode = "{cfg.datasets.mode}"\n'

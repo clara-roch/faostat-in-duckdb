@@ -234,6 +234,61 @@ def test_source_row_counters_agree_on_multiline_file(tmp_path):
     assert importer_mod.count_source_rows(csv_path, "utf-8", imported=4) == (4, "line-count")
 
 
+def test_year_filter_keeps_only_selected_years(con, tmp_path):
+    # MAIN_CSV holds years 2000 (6 rows) and 2001 (2 rows). Filtering to 2000
+    # keeps exactly the 6 matching rows, and every stored year is 2000.
+    result = importer_mod.import_archive(
+        con, _make_archive(tmp_path), "QCL", tmp_path / "b", years={2000}
+    )
+    assert result.row_count == 6
+    assert result.year_filter == (2000,)
+    # The full delivered CSV count is still recorded for provenance...
+    assert result.source_row_count == 8
+    # ...and a filtered subset is reported lossless (no matching row dropped).
+    assert result.lossless
+    # Only 2000 survived: the year column is now constant across the subset, so it
+    # is losslessly lifted into faostat_constant_column with value 2000.
+    (year_const,) = con.execute(
+        "SELECT value FROM faostat_constant_column "
+        "WHERE dataset_code = 'QCL' AND column_name = 'year'"
+    ).fetchone()
+    assert year_const == "2000"
+
+
+def test_year_filter_range_selects_all_matching(con, tmp_path):
+    result = importer_mod.import_archive(
+        con, _make_archive(tmp_path), "QCL", tmp_path / "b", years={2000, 2001}
+    )
+    assert result.row_count == 8  # both years present -> whole file
+    assert result.year_filter == (2000, 2001)
+
+
+def test_year_filter_empty_result_when_no_year_matches(con, tmp_path):
+    result = importer_mod.import_archive(
+        con, _make_archive(tmp_path), "QCL", tmp_path / "b", years={1975}
+    )
+    assert result.row_count == 0
+    assert result.year_filter == (1975,)
+
+
+NO_YEAR_CSV = """\
+"Area Code","Area","Item Code","Item","Value","Flag"
+"2","Afghanistan","15","Wheat","3200","A"
+"68","France","15","Wheat","37000","A"
+"""
+
+
+def test_year_filter_ignored_when_no_year_column(con, tmp_path):
+    # A dataset without a "Year" column can't be filtered; it imports in full and
+    # year_filter is None so normal full-CSV losslessness still applies.
+    result = importer_mod.import_archive(
+        con, _make_archive(tmp_path, main=NO_YEAR_CSV), "QCL", tmp_path / "b", years={2000}
+    )
+    assert result.year_filter is None
+    assert result.row_count == 2
+    assert result.lossless
+
+
 def test_keep_raw_tables_preserves_untouched_copy(con, tmp_path):
     importer_mod.import_csv(
         con,

@@ -50,6 +50,5 @@ FAOSTATdb_files/
 README_files/
 *.html
 
-# Local secrets / machine-specific paths
-secrets.env
+# Local env files
 *.env
