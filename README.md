@@ -456,12 +456,3 @@ SELECT dataset_code, file_rows_declared, source_csv_rows, rows_imported
 FROM faostat_dataset
 WHERE rows_imported <> source_csv_rows;   -- expect zero rows
 ```
-
-## Development
-
-```bash
-pip install -e ".[dev]"      # or ".[dev,ui]" for the rich progress UI
-pytest
-```
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for module roles, the build pipeline internals, and the importer's data-model decisions. See [PLAN.md](PLAN.md) for the v0.1 build plan and [FAOSTATdb.md](FAOSTATdb.md) for the design rationale.
