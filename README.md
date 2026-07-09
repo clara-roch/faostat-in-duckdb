@@ -73,7 +73,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 
 | Flag                                       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local (or under `$FAOSTATDB_DATABASE_DIR` if set); see [Where files are stored](#where-files-are-stored).                                                                                                                                                                                                                                                                                 |
+| `--database PATH`                          | Output DuckDB path/filename (overrides `build.database`). A bare filename is written project-local; use an absolute path to write elsewhere. See [Where files are stored](#where-files-are-stored).                                                                                                                                                                                                                                                                                    |
 | `--include QCL,FBS`                        | Build **only** these codes (selection mode → `include`).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `--exclude FA,CBH`                         | Build everything **except** these codes (mode → `exclude`). `--include` wins if both are given.                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--years 2000-2010,2020`                   | Keep **only** rows for these year(s) (single years, comma lists and inclusive `lo-hi` ranges). The whole archive is still downloaded (FAOSTAT ships all years in one ZIP); non-matching rows are dropped at import. Datasets with no year column import in full. **Accumulates**: if the database already holds a dataset, the new years are merged in and existing years are kept — see [Building up years incrementally](#building-up-years-incrementally). Overrides `build.years`. |
@@ -420,7 +420,7 @@ Configuration resolves in three layers, lowest precedence first:
 
 ```toml
 [build]
-database = "faostat.duckdb"             # filename; final DB written project-local (or under $FAOSTATDB_DATABASE_DIR)
+database = "faostat.duckdb"             # filename; final DB written project-local; use absolute path to write elsewhere
 download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
 keep_archives = false                   # delete cached .zip after a successful build (hot restart still reuses them after a failure)
 jobs = 0                                # parallel downloads; 0 = auto min(8, 2*cpu)
@@ -442,7 +442,7 @@ area_classification = true    # non-source curated is_country flag from area_cla
 historical_validity = true    # fill valid_from/valid_to for former areas (implies area_classification; false / --no-enrich-history to skip)
 ```
 
-Every key above has a matching CLI flag on `faostatdb build` (see the flags table) for one-off overrides. To change the output location, either set `database` to an absolute path, or set the `FAOSTATDB_DATABASE_DIR` environment variable to redirect a bare-filename database to another directory — see [Where files are stored](#where-files-are-stored).
+Every key above has a matching CLI flag on `faostatdb build` (see the flags table) for one-off overrides. To change the output location, set `database` / `--database` to an absolute path — see [Where files are stored](#where-files-are-stored).
 
 ## Reproducibility
 

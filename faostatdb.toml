@@ -9,7 +9,7 @@
 
 [build]
 database = "faostat.duckdb"             # filename; final DB written project-local (cwd) by default
-                                        #   (set FAOSTATDB_DATABASE_DIR to redirect a bare filename to another dir)
+                                        #   use an absolute path to write elsewhere
 download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
 keep_archives = false                   # delete cached .zip after a successful build
                                         #   (hot restart still reuses them after a

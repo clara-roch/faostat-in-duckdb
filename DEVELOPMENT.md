@@ -57,7 +57,7 @@ Everything starts at the CLI and flows through the modules below. The entry poin
 | **Download manifest** (`manifest.jsonl`) | `<download_dir>/.faostatdb-downloads/`                                            | persists between runs (hot restart)                                                         |
 | **Extracted CSVs**                       | a temp build dir under `download_dir`                                             | deleted immediately after each import                                                       |
 
-The **output database** location is resolved from `build.database`: an absolute path is used as-is; a bare filename (default `faostat.duckdb`) is written project-local, in the current working directory. Set `$FAOSTATDB_DATABASE_DIR` to redirect a bare filename to a specific directory (e.g. a large external volume). The built database is git-ignored (see `.gitignore`) rather than hidden in an OS data directory, so it's easy to find yet never committed by accident.
+The **output database** location is resolved from `build.database`: an absolute path is used as-is; a bare filename (default `faostat.duckdb`) is written project-local, in the current working directory. Use an absolute path in `build.database` / `--database` to write to a specific directory (e.g. a large external volume). The built database is git-ignored (see `.gitignore`) rather than hidden in an OS data directory, so it's easy to find yet never committed by accident.
 
 ## How the database is constructed
 

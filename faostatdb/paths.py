@@ -9,25 +9,21 @@ Two distinct locations:
   :func:`resolve_download_dir`.
 * **The final ``.duckdb``** is written *project-local* by default (a bare filename
   like ``faostat.duckdb`` lands in the current working directory, next to the
-  project that built it), with the ``FAOSTATDB_DATABASE_DIR`` environment variable
-  as an explicit override for the parent directory. See
-  :func:`resolve_database_path`. Keep the built DB out of git via ``.gitignore``,
-  not by hiding it in an OS data directory.
+  project that built it). Keep the built DB out of git via ``.gitignore``, not by
+  hiding it in an OS data directory.
 
 Download-dir resolution order (highest precedence first):
 
 1. ``--download-dir DIR`` (explicit CLI flag / config ``download_dir``), with
-   ``${VAR}`` / ``%VAR%`` / ``~`` expansion applied.
-2. ``FAOSTATDB_DOWNLOAD_DIR`` environment variable.
-3. If keeping archives: project-local ``./faostat_temp_download/``.
-4. Otherwise: an OS-appropriate cache directory (never the repo).
+   ``~`` expansion applied.
+2. If keeping archives: project-local ``./faostat_temp_download/``.
+3. Otherwise: an OS-appropriate cache directory (never the repo).
 
 The download manifest always lives under ``<download_dir>/.faostatdb-downloads/``.
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -36,8 +32,6 @@ PROJECT_LOCAL_DIRNAME = "faostat_temp_download"
 MANIFEST_DIRNAME = ".faostatdb-downloads"
 MANIFEST_FILENAME = "manifest.jsonl"
 APP_NAME = "faostatdb"
-ENV_DOWNLOAD_DIR = "FAOSTATDB_DOWNLOAD_DIR"
-ENV_DATABASE_DIR = "FAOSTATDB_DATABASE_DIR"
 
 
 def resolve_download_dir(
@@ -48,14 +42,14 @@ def resolve_download_dir(
 ) -> Path:
     """Resolve the directory where raw archives are downloaded / cached.
 
-    The directory is created if necessary. A relative explicit/env path is
-    resolved against ``cwd`` so archives stay inside the project by default.
-    When neither an explicit path nor the env var is set, the location depends on
-    ``keep_archives``: project-local when we mean to keep them around, otherwise
-    an OS cache dir so they don't clutter the working tree.
+    The directory is created if necessary. A relative explicit path is resolved
+    against ``cwd`` so archives stay inside the project by default. When no
+    explicit path is set, the location depends on ``keep_archives``: project-local
+    when we mean to keep them around, otherwise an OS cache dir so they don't
+    clutter the working tree.
     """
     base = cwd or Path.cwd()
-    chosen = _expand(explicit) or _expand(os.environ.get(ENV_DOWNLOAD_DIR))
+    chosen = _expand(explicit)
     if chosen:
         resolved = Path(chosen).expanduser()
     elif keep_archives:
@@ -72,39 +66,30 @@ def resolve_database_path(database: str, *, cwd: Path | None = None) -> Path:
     """Resolve where the final ``.duckdb`` is written.
 
     An absolute ``database`` is used verbatim. A bare filename (or relative path)
-    is placed inside ``$FAOSTATDB_DATABASE_DIR`` if that variable is set;
-    otherwise it resolves against ``cwd`` so the built database lives project-local,
-    next to whatever built it. Keep it out of git via ``.gitignore`` rather than by
-    hiding it elsewhere. The parent directory is created.
+    resolves against ``cwd`` so the built database lives project-local, next to
+    whatever built it. Keep it out of git via ``.gitignore`` rather than by hiding
+    it elsewhere. The parent directory is created.
     """
     base = cwd or Path.cwd()
-    db = Path(os.path.expandvars(database)).expanduser()
+    db = Path(database).expanduser()
     if db.is_absolute():
         target = db
     else:
-        dir_env = _expand(os.environ.get(ENV_DATABASE_DIR))
-        parent = Path(dir_env).expanduser() if dir_env else base
-        if not parent.is_absolute():
-            parent = base / parent
-        target = parent / db
+        target = base / db
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
 
 
 def _expand(value: str | None) -> str | None:
-    """Expand environment variables in a configured path.
+    """Return a non-empty configured path after trimming whitespace.
 
-    Returns ``None`` for an empty value or one that still contains an unexpanded
-    reference (e.g. ``${FAOSTATDB_DOWNLOAD_DIR}`` when that variable is unset), so
-    resolution falls through to the next source instead of creating a literal
-    ``${...}`` directory.
+    Environment variables are intentionally not expanded. Path location should be
+    controlled by configuration or CLI flags, not ambient process state.
     """
     if not value:
         return None
-    expanded = os.path.expandvars(value).strip()
+    expanded = value.strip()
     if not expanded:
-        return None
-    if "${" in expanded or "%" in expanded:
         return None
     return expanded
 

@@ -50,7 +50,6 @@ def test_config_init_writes_and_respects_force(tmp_path, monkeypatch):
 
 def test_successful_build_removes_default_download_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FAOSTATDB_DOWNLOAD_DIR", raising=False)
     rec = metadata_mod.DatasetRecord(
         dataset_code="QCL",
         dataset_name="Crops",
