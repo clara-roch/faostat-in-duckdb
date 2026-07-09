@@ -42,7 +42,9 @@ faostat_temp_download/
 /.agent-shell/
 .idea/
 .vscode/
-.github/
+.github/*
+!/.github/workflows/
+!/.github/workflows/*.yml
 .claude/
 
 # Md-compilation files
