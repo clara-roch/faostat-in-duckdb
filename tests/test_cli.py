@@ -5,6 +5,7 @@ from __future__ import annotations
 import zipfile
 
 import duckdb
+import pytest
 
 from faostatdb import importer as importer_mod
 from faostatdb import metadata as metadata_mod
@@ -16,6 +17,22 @@ MAIN = (
     '"Area Code","Area","Item Code","Item","Value","Flag"\n'
     '"68","France","15","Wheat","37000","A"\n'
 )
+
+
+def test_top_level_help_uses_quarto_like_layout(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("Usage:   faostatdb <command> [options]\n")
+    assert "Version: " in out
+    assert "Description:\n\n  Build a local, source-preserving DuckDB mirror" in out
+    assert "Options:\n\n  -h, --help     - Show this help." in out
+    assert "Commands:\n\n  build           [options]" in out
+    assert out.index("  build           [options]") < out.index("  config          <command>")
+    assert out.index("  config          <command>") < out.index("  list            [options]")
+    assert "Run 'faostatdb <command> --help' for command-specific options." in out
 
 
 def test_config_init_writes_and_respects_force(tmp_path, monkeypatch):

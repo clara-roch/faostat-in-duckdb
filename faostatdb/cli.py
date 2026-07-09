@@ -21,12 +21,66 @@ from . import config as config_mod
 from . import metadata as metadata_mod
 from .config import Config, DatasetsConfig
 
+_TOP_LEVEL_DESCRIPTION = "Build a local, source-preserving DuckDB mirror of FAOSTAT bulk data."
+_TOP_LEVEL_COMMANDS = [
+    ("build", "[options]", "Download and import datasets into DuckDB."),
+    ("config", "<command>", "Manage configuration."),
+    ("list", "[options]", "List available FAOSTAT datasets."),
+    ("tables", "[options]", "List tables in a built database."),
+    ("info", "[database]", "Summarize a built database."),
+    ("validate", "[database]", "Check a built database's integrity."),
+    ("sql", "<query> [options]", "Run a SQL query against a built database."),
+    ("clean-cache", "[options]", "Delete cached archives and the download manifest."),
+    ("bench", "[options]", "Benchmark download throughput at several --jobs levels."),
+    ("self-contained", "[options]", "Build a single-file executable (.pyz) launcher."),
+]
+
+
+class _TopLevelHelpParser(argparse.ArgumentParser):
+    """ArgumentParser with a Quarto-like top-level help screen."""
+
+    def format_help(self) -> str:
+        if self.prog != "faostatdb":
+            return super().format_help()
+        return _format_top_level_help()
+
+
+def _format_top_level_help() -> str:
+    """Return the hand-formatted ``faostatdb --help`` text."""
+    command_width = max(len(name) for name, _, _ in _TOP_LEVEL_COMMANDS)
+    usage_width = max(len(usage) for _, usage, _ in _TOP_LEVEL_COMMANDS)
+    rows = [
+        "Usage:   faostatdb <command> [options]",
+        f"Version: {__version__}",
+        "",
+        "Description:",
+        "",
+        f"  {_TOP_LEVEL_DESCRIPTION}",
+        "",
+        "Options:",
+        "",
+        "  -h, --help     - Show this help.",
+        "  --version      - Show the version number for this program.",
+        "",
+        "Commands:",
+        "",
+    ]
+    for name, usage, help_text in _TOP_LEVEL_COMMANDS:
+        rows.append(f"  {name:<{command_width}}  {usage:<{usage_width}}  - {help_text}")
+    rows.extend(
+        [
+            "",
+            "Run 'faostatdb <command> --help' for command-specific options.",
+        ]
+    )
+    return "\n".join(rows) + "\n"
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argument parser (all commands and their flags)."""
-    parser = argparse.ArgumentParser(
+    parser = _TopLevelHelpParser(
         prog="faostatdb",
-        description="Build a local, source-preserving DuckDB mirror of FAOSTAT bulk data.",
+        description=_TOP_LEVEL_DESCRIPTION,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
