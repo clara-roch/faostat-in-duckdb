@@ -31,6 +31,8 @@ CSV are inserted with ``is_country = NULL`` (unclassified) rather than guessed.
 
 from __future__ import annotations
 
+import importlib.resources
+from contextlib import contextmanager
 from pathlib import Path
 
 from .schema import table_exists
@@ -38,7 +40,37 @@ from .schema import table_exists
 # Curated, committed classification data — authored from world knowledge, NOT
 # FAOSTAT source content. Ships inside the package so an installed build can find
 # it; edit this file (not the code) to change how areas are classified.
-AREA_CLASSIFICATION_CSV = Path(__file__).resolve().parent / "area_classification.csv"
+AREA_CLASSIFICATION_RESOURCE = "area_classification.csv"
+# On-disk path when the package is a real directory. Reads go through
+# :func:`_classification_csv` (not this path directly) so a ``self-contained``
+# ``.pyz`` build — where the packaged CSV is not a real filesystem file — works too.
+AREA_CLASSIFICATION_CSV = Path(__file__).resolve().parent / AREA_CLASSIFICATION_RESOURCE
+
+
+@contextmanager
+def _classification_csv(csv_path: "str | Path | None"):
+    """Yield a real filesystem path to the classification CSV for DuckDB.
+
+    An explicit ``csv_path`` (used by tests) is honoured verbatim. Otherwise the
+    committed package resource is resolved with :mod:`importlib.resources` and, when
+    it lives inside a zip (a ``self-contained`` ``.pyz``), extracted to a temporary
+    file — DuckDB's ``read_csv`` needs a genuine path, and ``Path(__file__).parent``
+    does not resolve to one inside a zipapp. Raises :class:`FileNotFoundError` if the
+    file is genuinely absent.
+    """
+    if csv_path is not None:
+        p = Path(csv_path)
+        if not p.exists():
+            raise FileNotFoundError(f"area classification CSV not found: {p}")
+        yield p
+        return
+    resource = importlib.resources.files(__package__).joinpath(
+        AREA_CLASSIFICATION_RESOURCE
+    )
+    with importlib.resources.as_file(resource) as p:
+        if not p.exists():
+            raise FileNotFoundError(f"area classification CSV not found: {resource}")
+        yield p
 
 # This table is package-derived (not source FAOSTAT content), so it is free to use
 # natural types: the FAO internal ``area_code`` and the transition years are stored
@@ -72,45 +104,67 @@ def enrich_areas(con, csv_path: "str | Path | None" = None) -> int:
     :func:`enrich_history` to fill them. Returns the number of areas written, or 0
     if there is no ``dim_area`` to work from. Idempotent: the table is fully rebuilt
     each call. An area with no matching CSV row is written with ``is_country = NULL``.
+
+    The same FAO ``area_code`` can carry slightly different labels across datasets
+    (e.g. ``"Least Developed Countries"`` vs ``"Least Developed Countries (LDCs)"``).
+    We classify a code if **any** of its label variants matches the curated file, and
+    pick the representative label and classification with deterministic aggregates
+    (``bool_or`` / ``max``) — so a rebuild always yields the same result, rather than
+    depending on which variant an arbitrary ``any_value`` happened to pick.
     """
     if not table_exists(con, "dim_area"):
         return 0
-
-    csv_path = Path(csv_path) if csv_path is not None else AREA_CLASSIFICATION_CSV
-    if not csv_path.exists():
-        raise FileNotFoundError(f"area classification CSV not found: {csv_path}")
 
     con.execute(DDL_AREA_CLASSIFICATION)
     con.execute("DELETE FROM area_classification")
 
     # Detect whether dim_area carries a label column (it usually does).
     dim_cols = {d[0] for d in con.execute("SELECT * FROM dim_area LIMIT 0").description}
-    label_expr = "any_value(area_label)" if "area_label" in dim_cols else "NULL"
 
-    con.execute(
-        f"""
-        INSERT INTO area_classification
-        WITH areas AS (
-            SELECT area_code, {label_expr} AS area_label
-            FROM dim_area
-            WHERE area_code IS NOT NULL
-            GROUP BY area_code
-        ),
-        curated AS (
-            SELECT lower(trim(area_name)) AS key,
-                   CAST(is_country AS BOOLEAN) AS is_country
-            FROM read_csv(?, header = true, all_varchar = true)
+    if "area_label" not in dim_cols:
+        # No label to match on: write every area unclassified (is_country NULL).
+        con.execute(
+            "INSERT INTO area_classification "
+            "SELECT DISTINCT TRY_CAST(area_code AS INTEGER), NULL, NULL, "
+            "CAST(NULL AS INTEGER), CAST(NULL AS INTEGER) "
+            "FROM dim_area WHERE area_code IS NOT NULL"
         )
-        SELECT TRY_CAST(a.area_code AS INTEGER) AS area_code,
-               a.area_label,
-               c.is_country,
-               CAST(NULL AS INTEGER) AS valid_from,
-               CAST(NULL AS INTEGER) AS valid_to
-        FROM areas a
-        LEFT JOIN curated c ON lower(trim(a.area_label)) = c.key
-        """,
-        [str(csv_path)],
-    )
+        (n,) = con.execute("SELECT COUNT(*) FROM area_classification").fetchone()
+        return n
+
+    with _classification_csv(csv_path) as csv_file:
+        con.execute(
+            """
+            INSERT INTO area_classification
+            WITH areas AS (
+                SELECT DISTINCT area_code, area_label
+                FROM dim_area
+                WHERE area_code IS NOT NULL
+            ),
+            curated AS (
+                SELECT lower(trim(area_name)) AS key,
+                       CAST(is_country AS BOOLEAN) AS is_country
+                FROM read_csv(?, header = true, all_varchar = true)
+            ),
+            matched AS (
+                SELECT a.area_code, a.area_label, c.is_country,
+                       (c.key IS NOT NULL) AS is_match
+                FROM areas a
+                LEFT JOIN curated c ON lower(trim(a.area_label)) = c.key
+            )
+            SELECT TRY_CAST(area_code AS INTEGER) AS area_code,
+                   -- prefer a label that matched the CSV; fall back to any label.
+                   COALESCE(max(area_label) FILTER (WHERE is_match),
+                            max(area_label)) AS area_label,
+                   -- classified if any variant matched; deterministic, NULL if none.
+                   bool_or(is_country) AS is_country,
+                   CAST(NULL AS INTEGER) AS valid_from,
+                   CAST(NULL AS INTEGER) AS valid_to
+            FROM matched
+            GROUP BY area_code
+            """,
+            [str(csv_file)],
+        )
     (n,) = con.execute("SELECT COUNT(*) FROM area_classification").fetchone()
     return n
 
@@ -133,26 +187,23 @@ def enrich_history(con, csv_path: "str | Path | None" = None) -> int:
     }:
         return 0  # nothing to match on
 
-    csv_path = Path(csv_path) if csv_path is not None else AREA_CLASSIFICATION_CSV
-    if not csv_path.exists():
-        raise FileNotFoundError(f"area classification CSV not found: {csv_path}")
-
-    con.execute(
-        """
-        UPDATE area_classification AS ac
-        SET valid_from = c.valid_from,
-            valid_to   = c.valid_to
-        FROM (
-            SELECT lower(trim(area_name)) AS key,
-                   TRY_CAST(NULLIF(valid_from, '') AS INTEGER) AS valid_from,
-                   TRY_CAST(NULLIF(valid_to, '')   AS INTEGER) AS valid_to
-            FROM read_csv(?, header = true, all_varchar = true)
-        ) AS c
-        WHERE lower(trim(ac.area_label)) = c.key
-          AND (c.valid_from IS NOT NULL OR c.valid_to IS NOT NULL)
-        """,
-        [str(csv_path)],
-    )
+    with _classification_csv(csv_path) as csv_file:
+        con.execute(
+            """
+            UPDATE area_classification AS ac
+            SET valid_from = c.valid_from,
+                valid_to   = c.valid_to
+            FROM (
+                SELECT lower(trim(area_name)) AS key,
+                       TRY_CAST(NULLIF(valid_from, '') AS INTEGER) AS valid_from,
+                       TRY_CAST(NULLIF(valid_to, '')   AS INTEGER) AS valid_to
+                FROM read_csv(?, header = true, all_varchar = true)
+            ) AS c
+            WHERE lower(trim(ac.area_label)) = c.key
+              AND (c.valid_from IS NOT NULL OR c.valid_to IS NOT NULL)
+            """,
+            [str(csv_file)],
+        )
     (updated,) = con.execute(
         "SELECT COUNT(*) FROM area_classification "
         "WHERE valid_from IS NOT NULL OR valid_to IS NOT NULL"

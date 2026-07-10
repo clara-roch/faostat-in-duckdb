@@ -107,6 +107,40 @@ def test_unknown_area_is_left_unclassified(con, tmp_path):
     assert _row(con, "World")[0] is None  # not in this CSV -> unclassified
 
 
+def test_label_variants_classify_by_any_matching_variant(tmp_path):
+    # The same area_code can carry different labels across datasets (e.g. an acronym
+    # suffix). A code must be classified if ANY variant matches the curated file, and
+    # deterministically — not depend on which label an arbitrary pick returns.
+    c = duckdb.connect()
+    try:
+        c.execute(
+            "CREATE TABLE dim_area (dataset_code VARCHAR, area_code VARCHAR, area_label VARCHAR)"
+        )
+        c.executemany(
+            "INSERT INTO dim_area VALUES (?, ?, ?)",
+            [
+                # one code, two label variants; only the suffixed one is in the CSV
+                ("QCL", "5801", "Least Developed Countries"),
+                ("FBS", "5801", "Least Developed Countries (LDCs)"),
+            ],
+        )
+        csv = tmp_path / "areas.csv"
+        csv.write_text(
+            "area_name,is_country,valid_from,valid_to\n"
+            "Least Developed Countries (LDCs),false,,\n",
+            encoding="utf-8",
+        )
+        n = enrich_mod.enrich_areas(c, csv_path=csv)
+        assert n == 1  # collapsed to one row per area_code
+        row = c.execute(
+            "SELECT area_label, is_country FROM area_classification WHERE area_code = 5801"
+        ).fetchone()
+        assert row[1] is False  # classified via the matching variant, not left NULL
+        assert row[0] == "Least Developed Countries (LDCs)"  # representative = matched label
+    finally:
+        c.close()
+
+
 def test_enrich_history_fills_validity_for_known_areas(con):
     enrich_mod.enrich_areas(con)
     updated = enrich_mod.enrich_history(con)
@@ -118,7 +152,7 @@ def test_enrich_history_fills_validity_for_known_areas(con):
     assert ussr[2] == 1991          # dissolved 1991 (stored as INTEGER)
 
     ssd = _row(con, "South Sudan")
-    assert ssd[1] == 2011           # split off in 2011 (stored as INTEGER)
+    assert ssd[1] == 2012           # first year in FAOSTAT data (Sudan former ends 2011)
     assert ssd[2] is None
 
 

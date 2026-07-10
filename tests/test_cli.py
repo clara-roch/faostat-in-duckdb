@@ -93,6 +93,56 @@ def test_successful_build_removes_default_download_dir(tmp_path, monkeypatch):
     assert not (tmp_path / "faostat_temp_download").exists()
 
 
+def test_enrichment_failure_does_not_abort_build(tmp_path, monkeypatch):
+    # Enrichment is a non-source, best-effort layer: if it blows up (e.g. a bad
+    # curated-CSV edit or an unexpected area code) the build must still finalize —
+    # every dataset is already imported, so the provenance row and a usable database
+    # must survive. Regression guard for enrichment being unwrapped in run_build.
+    monkeypatch.chdir(tmp_path)
+    rec = metadata_mod.DatasetRecord(
+        dataset_code="QCL",
+        dataset_name="Crops",
+        file_location="https://example.test/QCL.zip",
+        file_rows=1,
+    )
+    snapshot = metadata_mod.MetadataSnapshot(
+        url="https://example.test/datasets.json", sha256="0" * 64, datasets=[rec]
+    )
+
+    def fake_download(_url, dest, **_kwargs):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("QCL_E_All_Data.csv", MAIN)
+        return dest
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("simulated enrichment failure")
+
+    monkeypatch.setattr(metadata_mod, "fetch_and_parse", lambda: snapshot)
+    monkeypatch.setattr("faostatdb.download.download_with_retry", fake_download)
+    monkeypatch.setattr("faostatdb.enrich.enrich_areas", boom)
+
+    cfg = Config(
+        build=BuildConfig(database="faostat.duckdb", jobs=1, compact=False),
+        datasets=DatasetsConfig(mode="include", include=["QCL"]),
+        enrichment=EnrichmentConfig(area_classification=True, historical_validity=True),
+    )
+
+    # Build succeeds despite the enrichment error, even under --strict.
+    assert run_build(cfg, assume_yes=True, strict=True) == 0
+    db = tmp_path / "faostat.duckdb"
+    assert db.is_file()
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        # Provenance row was still written (i.e. _record_build ran after the failure).
+        assert con.execute("SELECT COUNT(*) FROM faostat_build").fetchone()[0] == 1
+        # The imported fact table is present and queryable.
+        assert con.execute("SELECT COUNT(*) FROM data_qcl").fetchone()[0] == 1
+        # Enrichment genuinely did not complete.
+        assert not schema_mod.table_exists(con, "area_classification")
+    finally:
+        con.close()
+
+
 def _built_db(tmp_path):
     """Create a minimal but real FAOSTATdb database file and return its path."""
     archive = tmp_path / "QCL.zip"

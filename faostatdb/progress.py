@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -168,33 +169,46 @@ class Reporter:
 class DownloadTracker:
     """Per-dataset download bars, backed by a rich ``Progress`` or a no-op.
 
-    Thread-safe for use from the download worker pool: rich's ``Progress`` guards
-    its own state, and the no-op path does nothing.
+    Safe to drive from the download worker pool: ``start``/``advance`` are called
+    from worker threads while ``finish`` is called from the main ``as_completed``
+    loop, so the shared ``_tasks`` map is guarded by a lock (rich's own ``Progress``
+    is separately thread-safe, and the no-op path does nothing). The lock — not the
+    GIL — is what keeps the map consistent, so this also holds on free-threaded
+    Python builds.
     """
 
     def __init__(self, progress) -> None:
         self._progress = progress
         self._tasks: dict[str, int] = {}
+        self._lock = threading.Lock()
 
     def start(self, code: str, total_bytes: int | None) -> None:
         if self._progress is None:
             return
-        self._tasks[code] = self._progress.add_task(
+        task_id = self._progress.add_task(
             code, total=total_bytes if total_bytes else None
         )
+        with self._lock:
+            self._tasks[code] = task_id
 
     def advance(self, code: str, done: int, total: int | None) -> None:
-        if self._progress is None or code not in self._tasks:
+        if self._progress is None:
+            return
+        with self._lock:
+            task_id = self._tasks.get(code)
+        if task_id is None:
             return
         # completed is absolute bytes-so-far; update total in case it arrived late.
-        self._progress.update(
-            self._tasks[code], completed=done, total=total if total else None
-        )
+        self._progress.update(task_id, completed=done, total=total if total else None)
 
     def finish(self, code: str) -> None:
-        if self._progress is None or code not in self._tasks:
+        if self._progress is None:
             return
-        self._progress.remove_task(self._tasks.pop(code))
+        with self._lock:
+            task_id = self._tasks.pop(code, None)
+        if task_id is None:
+            return
+        self._progress.remove_task(task_id)
 
 
 def _stdout_unicode() -> bool:

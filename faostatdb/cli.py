@@ -599,18 +599,27 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
 
         # Optional enrichment (clearly non-source; opt-in). Historical validity
         # augments the classification table, so it requires the base table too.
+        # It is *best-effort*, like compaction: enrichment is a non-source cosmetic
+        # layer and must never abort an otherwise-successful build (every dataset is
+        # already imported at this point). Any failure — e.g. a bad curated-CSV edit
+        # or an unexpected area code — is warned and swallowed so the build still
+        # finalizes (records provenance + checkpoints + compacts). Not gated by
+        # --strict, which concerns source-data losslessness, not this layer.
         if cfg.enrichment.area_classification or cfg.enrichment.historical_validity:
-            from . import enrich as enrich_mod
+            try:
+                from . import enrich as enrich_mod
 
-            n = enrich_mod.enrich_areas(con)
-            if n:
-                reporter.log(f"enriched {n:,} area(s) into area_classification")
-            if cfg.enrichment.historical_validity:
-                h = enrich_mod.enrich_history(con)
-                if h:
-                    reporter.log(
-                        f"filled historical validity for {h:,} former/successor area(s)"
-                    )
+                n = enrich_mod.enrich_areas(con)
+                if n:
+                    reporter.log(f"enriched {n:,} area(s) into area_classification")
+                if cfg.enrichment.historical_validity:
+                    h = enrich_mod.enrich_history(con)
+                    if h:
+                        reporter.log(
+                            f"filled historical validity for {h:,} former/successor area(s)"
+                        )
+            except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+                reporter.log(f"enrichment skipped ({exc})")
 
         _record_build(con, build_id, started_at, snapshot, cfg, len(imported), len(failed))
         con.execute("CHECKPOINT")
