@@ -115,8 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument(
         "--years",
         default=None,
-        help="only import rows for these year(s), e.g. '2010', '2000,2005,2010' "
-        "or '1990-1995,2020' (the whole archive is still downloaded)",
+        help="only import rows for these year(s), e.g. '2010', '2000,2005,2010', "
+        "'1990-1995,2020' or '2000-' (the whole archive is still downloaded)",
     )
     p_build.add_argument("--keep-archives", action="store_true", help="keep ZIPs after build")
     p_build.add_argument(
@@ -375,8 +375,8 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
     )
     if years:
         reporter.log(
-            f"year filter active: keeping only rows for year(s) {cfg.build.years} "
-            f"({len(years)} year(s)). Datasets already present in {cfg.build.database} "
+            f"year filter active: keeping only rows for {years.describe()} "
+            f"({years.count_description()}). Datasets already present in {cfg.build.database} "
             f"accumulate (these years are merged in, other years kept); datasets "
             f"without a year column import in full"
         )

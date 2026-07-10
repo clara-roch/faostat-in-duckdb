@@ -15,6 +15,7 @@ import pytest
 
 from faostatdb import importer as importer_mod
 from faostatdb import schema as schema_mod
+from faostatdb.config import parse_years
 
 # A miniature QCL-shaped dataset. Note the deliberate structure:
 #   * "Domain Code"/"Domain" are constant across every row (as in real FAOSTAT)
@@ -260,6 +261,16 @@ def test_year_filter_range_selects_all_matching(con, tmp_path):
     assert result.year_filter == (2000, 2001)
 
 
+def test_year_filter_open_ended_selects_matching_years(con, tmp_path):
+    result = importer_mod.import_archive(
+        con, _make_multi(tmp_path), "QCL", tmp_path / "b", years=parse_years("2001-")
+    )
+    assert result.row_count == 3
+    assert result.year_filter == (2001, 2002)
+    years = {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()}
+    assert years == {2001, 2002}
+
+
 def test_year_filter_empty_result_when_no_year_matches(con, tmp_path):
     result = importer_mod.import_archive(
         con, _make_archive(tmp_path), "QCL", tmp_path / "b", years={1975}
@@ -341,6 +352,18 @@ def test_accumulate_same_year_is_idempotent(con, tmp_path):
     )
     assert result.appended_rows == 2
     assert con.execute("SELECT COUNT(*) FROM data_qcl").fetchone()[0] == first  # no dupes
+
+
+def test_accumulate_open_ended_years_refreshes_actual_incoming_years(con, tmp_path):
+    importer_mod.import_archive(con, _make_multi(tmp_path), "QCL", tmp_path / "b1", years={2000})
+    result = importer_mod.import_archive(
+        con, _make_multi(tmp_path), "QCL", tmp_path / "b2", years=parse_years("2001-")
+    )
+    assert result.appended_rows == 3
+    assert result.row_count == 5
+    assert result.year_filter == (2001, 2002)
+    years = {r[0] for r in con.execute("SELECT DISTINCT year FROM data_qcl").fetchall()}
+    assert years == {2000, 2001, 2002}
 
 
 def test_full_build_replaces_not_accumulates(con, tmp_path):

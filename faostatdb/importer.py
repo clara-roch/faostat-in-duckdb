@@ -39,6 +39,7 @@ import zipfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .config import YearFilter
 from .schema import (
     DDL_FAOSTAT_CONSTANT_COLUMN,
     column_names,
@@ -240,7 +241,18 @@ def read_csv_header(con, csv_path: Path, encoding: str = "utf-8") -> list[str]:
 _AUTO_TYPE_CANDIDATES = "['INTEGER', 'BIGINT', 'DOUBLE', 'VARCHAR']"
 
 
-def _year_where_clause(raw_cols: list[str], norm_cols: list[str], years: set[int]) -> str | None:
+def _coerce_year_filter(years: YearFilter | set[int] | None) -> YearFilter | None:
+    """Accept the public parsed filter and legacy test/internal ``set`` inputs."""
+    if years is None:
+        return None
+    if isinstance(years, YearFilter):
+        return years
+    return YearFilter(frozenset(years))
+
+
+def _year_where_clause(
+    raw_cols: list[str], norm_cols: list[str], years: YearFilter
+) -> str | None:
     """Build a ``WHERE`` filtering ``read_csv`` output to ``years`` on the year column.
 
     Returns the SQL fragment (referencing the *raw* header, which is what
@@ -252,13 +264,19 @@ def _year_where_clause(raw_cols: list[str], norm_cols: list[str], years: set[int
     if "year" not in norm_cols:
         return None
     raw_year = raw_cols[norm_cols.index("year")]
-    in_list = ", ".join(str(y) for y in sorted(years))
-    return f'WHERE TRY_CAST("{raw_year}" AS BIGINT) IN ({in_list})'
+    cast_year = f'TRY_CAST("{raw_year}" AS BIGINT)'
+    clauses: list[str] = []
+    if years.years:
+        in_list = ", ".join(str(y) for y in sorted(years.years))
+        clauses.append(f"{cast_year} IN ({in_list})")
+    if years.start is not None:
+        clauses.append(f"{cast_year} >= {years.start}")
+    return "WHERE " + " OR ".join(f"({c})" for c in clauses)
 
 
 def import_csv(
     con, csv_path: Path, dataset_code: str, *, keep_raw: bool = False,
-    years: set[int] | None = None,
+    years: YearFilter | set[int] | None = None,
 ) -> ImportResult:
     """Create ``data_<code>`` from ``csv_path`` with normalized column names.
 
@@ -306,13 +324,16 @@ def import_csv(
     encoding = detect_encoding(csv_path)
     raw_cols = read_csv_header(con, csv_path, encoding)
     norm_cols = normalize_columns(raw_cols)
+    year_filter = _coerce_year_filter(years)
 
     # Optional year filter: FAOSTAT ships every year in one bulk archive, so the
     # whole file is already on disk; here we keep only the requested years' rows.
     # A dataset without a ``year`` column can't be filtered, so it imports in full
     # (year_filter stays None and normal full-CSV losslessness still applies).
-    where = _year_where_clause(raw_cols, norm_cols, years) if years else None
-    applied_years = tuple(sorted(years)) if (years and where) else None
+    where = _year_where_clause(raw_cols, norm_cols, year_filter) if year_filter else None
+    applied_years: tuple[int, ...] | None = (
+        tuple(sorted(year_filter.years)) if (year_filter and where) else None
+    )
 
     # Accumulate into an existing dataset only when we have both a year key to merge
     # on and a table already present. Otherwise this is a normal (replacing) import,
@@ -343,6 +364,14 @@ def import_csv(
         ) from exc
 
     (count,) = con.execute(f'SELECT COUNT(*) FROM "{target}"').fetchone()
+    if where and year_filter and year_filter.start is not None:
+        applied_years = tuple(
+            r[0]
+            for r in con.execute(
+                f'SELECT DISTINCT TRY_CAST("year" AS BIGINT) AS y FROM "{target}" '
+                "WHERE y IS NOT NULL ORDER BY y"
+            ).fetchall()
+        )
 
     # Verify losslessness against the delivered CSV itself — counted independently
     # of DuckDB — rather than the approximate FileRows metadata. Dimension/constant
@@ -384,7 +413,10 @@ def import_csv(
 
     # Merge the reduced incoming rows into the existing fact table, then discard the
     # staging table. ``count`` here is the rows this build contributes for its years.
-    total = _merge_incoming(con, dataset_code, table, target, applied_years)
+    if not applied_years:
+        total = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    else:
+        total = _merge_incoming(con, dataset_code, table, target, applied_years)
     con.execute(f'DROP TABLE IF EXISTS "{target}"')
     return ImportResult(
         dataset_code=dataset_code,
@@ -775,7 +807,7 @@ def _first_index(seq, pred) -> int | None:
 
 def import_archive(
     con, archive: Path, dataset_code: str, build_dir: Path, *, keep_raw: bool = False,
-    years: set[int] | None = None,
+    years: YearFilter | set[int] | None = None,
 ) -> ImportResult:
     """Extract + import one archive, then build flag dim + labelled view.
 

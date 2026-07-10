@@ -200,7 +200,23 @@ def test_parse_years_inclusive_ranges():
     assert parse_years("1990-1992,2000") == {1990, 1991, 1992, 2000}
 
 
-@pytest.mark.parametrize("spec", ["abc", "2000-", "20x0", "2010-2000", "0", "10000"])
+def test_parse_years_open_ended_range():
+    years = parse_years("2000-")
+    assert years is not None
+    assert years.start == 2000
+    assert set(years.years) == set()
+    assert years.describe() == "2000-"
+
+
+def test_parse_years_open_ended_range_can_combine_with_explicit_years():
+    years = parse_years("1990,2000-")
+    assert years is not None
+    assert years.start == 2000
+    assert set(years.years) == {1990}
+    assert years.describe() == "1990,2000-"
+
+
+@pytest.mark.parametrize("spec", ["abc", "-", "20x0", "2010-2000", "0", "10000"])
 def test_parse_years_rejects_bad_specs(spec):
     with pytest.raises(ValueError):
         parse_years(spec)

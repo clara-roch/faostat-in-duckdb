@@ -50,12 +50,13 @@ class BuildConfig:
     # Keep an untouched ``raw_<code>`` copy of each import for debugging.
     keep_raw_tables: bool = False
     # Restrict imported rows to selected year(s). Empty == all years. A spec of
-    # comma-separated single years and inclusive ranges, e.g. "2010",
-    # "2000,2005,2010" or "1990-1995,2020". FAOSTAT ships every year in one bulk
-    # archive, so the whole ZIP is still downloaded; the filter drops non-matching
-    # rows at import time (see importer.import_csv). Building years into a database
-    # that already holds the dataset *accumulates* — the new years are merged in and
-    # previously-stored years are kept. Parsed by parse_years.
+    # comma-separated single years, inclusive ranges, and open-ended lower bounds,
+    # e.g. "2010", "2000,2005,2010", "1990-1995,2020" or "2000-". FAOSTAT ships
+    # every year in one bulk archive, so the whole ZIP is still downloaded; the
+    # filter drops non-matching rows at import time (see importer.import_csv).
+    # Building years into a database that already holds the dataset *accumulates* —
+    # the new years are merged in and previously-stored years are kept. Parsed by
+    # parse_years.
     years: str = ""
 
 
@@ -109,6 +110,47 @@ class Config:
     enrichment: EnrichmentConfig = field(default_factory=EnrichmentConfig)
 
 
+@dataclass(frozen=True)
+class YearFilter:
+    """Parsed ``--years`` selection.
+
+    ``years`` stores explicit single years and closed ranges. ``start`` stores an
+    open-ended lower bound from syntax like ``2000-``. The two can be combined as a
+    union, although the common cases are either finite years or one open-ended
+    start.
+    """
+
+    years: frozenset[int] = field(default_factory=frozenset)
+    start: int | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.years) or self.start is not None
+
+    def __iter__(self):
+        return iter(sorted(self.years))
+
+    def __len__(self) -> int:
+        return len(self.years)
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, set):
+            return self.start is None and set(self.years) == other
+        return super().__eq__(other)
+
+    def describe(self) -> str:
+        parts = [str(y) for y in sorted(self.years)]
+        if self.start is not None:
+            parts.append(f"{self.start}-")
+        return ",".join(parts)
+
+    def count_description(self) -> str:
+        if self.start is not None:
+            if self.years:
+                return f"{len(self.years)} explicit year(s) plus years >= {self.start}"
+            return f"years >= {self.start}"
+        return f"{len(self.years)} year(s)"
+
+
 def auto_jobs() -> int:
     """Adaptive default download concurrency: ``min(8, 2 * cpu_count)``.
 
@@ -124,12 +166,13 @@ def resolve_jobs(jobs: int) -> int:
     return auto_jobs() if jobs <= 0 else jobs
 
 
-def parse_years(spec: str | None) -> set[int] | None:
-    """Parse a ``[build] years`` / ``--years`` spec into a set of years.
+def parse_years(spec: str | None) -> YearFilter | None:
+    """Parse a ``[build] years`` / ``--years`` spec into a year filter.
 
     Returns ``None`` when no filter is requested (empty / whitespace) so callers
     can treat "all years" distinctly from "an empty selection". A spec is a
-    comma-separated list of single years and inclusive ``lo-hi`` ranges::
+    comma-separated list of single years, inclusive ``lo-hi`` ranges, and one or
+    more open-ended ``lo-`` lower bounds::
 
         >>> sorted(parse_years("2010"))
         [2010]
@@ -137,6 +180,8 @@ def parse_years(spec: str | None) -> set[int] | None:
         [2000, 2005, 2010]
         >>> sorted(parse_years("1990-1992,2000"))
         [1990, 1991, 1992, 2000]
+        >>> parse_years("2000-").start
+        2000
         >>> parse_years("") is None
         True
 
@@ -146,9 +191,13 @@ def parse_years(spec: str | None) -> set[int] | None:
     if spec is None or not spec.strip():
         return None
     years: set[int] = set()
+    starts: list[int] = []
     for token in spec.split(","):
         token = token.strip()
         if not token:
+            continue
+        if token.endswith("-") and token[:-1].strip():
+            starts.append(_parse_year(token[:-1], spec))
             continue
         if "-" in token.lstrip("-"):
             # A range "lo-hi" (the lstrip guards against a leading sign so a bare
@@ -160,9 +209,10 @@ def parse_years(spec: str | None) -> set[int] | None:
             years.update(range(lo, hi + 1))
         else:
             years.add(_parse_year(token, spec))
-    if not years:
+    start = min(starts) if starts else None
+    if not years and start is None:
         raise ValueError(f"no years parsed from {spec!r}")
-    return years
+    return YearFilter(frozenset(years), start)
 
 
 def _parse_year(text: str, spec: str) -> int:
