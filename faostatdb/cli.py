@@ -1162,7 +1162,11 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
             enrichment, area_classification=True, historical_validity=True
         )
     if args.no_enrich_areas:
-        enrichment = replace(enrichment, area_classification=False)
+        # Historical validity is an augmentation of area_classification, so
+        # disabling the base area table must disable history as well.
+        enrichment = replace(
+            enrichment, area_classification=False, historical_validity=False
+        )
     if args.no_enrich_history:
         enrichment = replace(enrichment, historical_validity=False)
 

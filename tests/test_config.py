@@ -151,6 +151,14 @@ def test_no_enrich_flags_opt_out():
     assert cfg.enrichment.historical_validity is False
 
 
+def test_no_enrich_areas_also_disables_history():
+    from faostatdb import cli
+
+    cfg = cli._apply_build_overrides(_build_args(["--no-enrich-areas"]), default_config())
+    assert cfg.enrichment.area_classification is False
+    assert cfg.enrichment.historical_validity is False
+
+
 def test_negation_wins_over_positive_flag():
     from faostatdb import cli
 
