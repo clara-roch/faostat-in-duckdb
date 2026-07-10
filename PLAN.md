@@ -143,6 +143,14 @@ covered by tests + a real end-to-end smoke build:
 - JSON / ASCII / no-progress reporting modes; rich download bars.
 - Final DB compaction (`COPY FROM DATABASE`) to reclaim space.
 - Optional `raw_<code>` tables (`--keep-raw-tables`) and area enrichment (`--enrich-areas`).
+- **Year filtering and accumulation** (`--years`): imports selected years from the
+  already-downloaded bulk archive and, when the dataset already exists, refreshes the
+  incoming years while preserving other years. Accumulation assumes those year slices
+  come from the same upstream FAOSTAT release/vintage; it is meant to add or refresh
+  slices, not to merge independently updated FAOSTAT vintages. If FAOSTAT changes
+  dimension labels, alternate codes, or other dimension attributes between accumulated
+  runs, the local database may retain attributes from the earlier import. This is an
+  edge case of mixing source vintages, not a normal update workflow.
 - Hot-restart archive reuse; `keep_archives` (default false) deletes archives only on a
   *successful* build, and can be set true to persist the cache for fast re-runs.
 - **Historical country-validity metadata** (`--enrich-history` / `[enrichment]

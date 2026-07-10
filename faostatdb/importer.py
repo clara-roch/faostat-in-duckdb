@@ -295,6 +295,12 @@ def import_csv(
     ``build --years 2018`` leaves both years in the database, and re-running a year
     just refreshes it (idempotent). The 2017 rows are not re-parsed — only the new
     archive is read and merged with in-database SQL. See :func:`_merge_incoming`.
+    Accumulation assumes the year slices come from the same upstream FAOSTAT
+    release/vintage: it is meant to add or refresh year slices, not to merge
+    independently updated FAOSTAT vintages. If FAOSTAT changes dimension labels,
+    alternate codes, or other dimension attributes between accumulated runs, the
+    local database may retain dimension attributes from the earlier import; this is
+    an edge case of mixing source vintages, not a normal update workflow.
     """
     table = table_name_for(dataset_code)
     encoding = detect_encoding(csv_path)
