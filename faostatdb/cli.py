@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete ZIPs after a successful build",
     )
     p_build.add_argument("--download-dir", default=None, help="archive download directory")
+    p_build.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="delete an existing output database before building",
+    )
     p_build.add_argument("--yes", "--all", action="store_true", help="assume yes for prompts")
     p_build.add_argument("--strict", action="store_true", help="fail build on any error")
     p_build.add_argument(
@@ -1129,6 +1134,8 @@ def _apply_build_overrides(args: argparse.Namespace, cfg: Config) -> Config:
         build = replace(build, download_dir=args.download_dir)
     if args.jobs is not None:
         build = replace(build, jobs=args.jobs)
+    if args.overwrite:
+        build = replace(build, overwrite=True)
     if args.keep_archives:
         build = replace(build, keep_archives=True)
     if args.no_keep_archives:

@@ -65,7 +65,7 @@ By default, downloaded archives are **deleted after a successful build** (`keep_
 faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
                 [--years 2000-2010,2020] \
                 [--jobs N] [--keep-archives | --no-keep-archives] \
-                [--download-dir DIR] [--yes] [--strict] \
+                [--download-dir DIR] [--overwrite] [--yes] [--strict] \
                 [--no-compact] [--keep-raw-tables] \
                 [--no-enrich-areas] [--no-enrich-history] \
                 [--json] [--ascii] [--no-progress]
@@ -80,6 +80,7 @@ faostatdb build [--database PATH] [--include QCL,FBS] [--exclude FA,CBH] \
 | `--jobs N`                                 | Parallel download workers (overrides `build.jobs`; `0`/unset = auto `min(8, 2×cpu)`).                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--keep-archives` / `--no-keep-archives`   | Force keeping / deleting the cached `*.zip` after a successful build. Default: **delete** on success (`keep_archives = false`); hot restart still reuses them after a failure.                                                                                                                                                                                                                                                                                                         |
 | `--download-dir DIR`                       | Where raw archives are cached (overrides `build.download_dir`).                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `--overwrite`                              | Delete an existing output database before building. Use this for an explicit fresh rebuild; leave it off for the default incremental in-place behavior.                                                                                                                                                                                                                                                                                                                                |
 | `--yes` (alias `--all`)                    | Skip the confirmation prompt. **Required** for non-interactive runs and scripts.                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `--strict`                                 | Abort the whole build on the first error. Without it, failed datasets are recorded + skipped and the rest continue.                                                                                                                                                                                                                                                                                                                                                                    |
 | `--no-compact`                             | Skip the final compaction pass (faster, but a larger file — see [Making the database small](#making-the-database-as-small-as-possible)).                                                                                                                                                                                                                                                                                                                                               |
@@ -108,7 +109,7 @@ faostatdb build --yes --include CBH,SXS,WCAD
 
 Failed datasets keep their cached archives, so the re-run reuses them via the hot-restart manifest instead of downloading again.
 
-> ⚠️ Do **not** set `overwrite = true` for this — it wipes the whole database file before building, losing the datasets you already have.
+> ⚠️ Do **not** pass `--overwrite` or set `overwrite = true` for this — it wipes the whole database file before building, losing the datasets you already have.
 
 #### Building up years incrementally
 
@@ -424,7 +425,7 @@ database = "faostat.duckdb"             # filename; final DB written project-loc
 download_dir = "faostat_temp_download"  # where raw ZIPs are cached, project-local
 keep_archives = false                   # delete cached .zip after a successful build (hot restart still reuses them after a failure)
 jobs = 0                                # parallel downloads; 0 = auto min(8, 2*cpu)
-overwrite = false                       # true wipes the DB before building
+overwrite = false                       # true wipes the DB before building; prefer --overwrite for one-off fresh builds
 compact = true                          # rewrite the finished DB to reclaim space
 keep_raw_tables = false                 # keep untouched raw_<code> copies (debug)
 

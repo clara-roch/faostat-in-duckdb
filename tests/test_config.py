@@ -141,6 +141,16 @@ def test_build_keeps_enrichment_on_without_flags():
     assert cfg.enrichment.historical_validity is True
 
 
+def test_overwrite_flag_opts_into_fresh_database_build():
+    from faostatdb import cli
+
+    cfg = cli._apply_build_overrides(_build_args([]), default_config())
+    assert cfg.build.overwrite is False
+
+    cfg = cli._apply_build_overrides(_build_args(["--overwrite"]), default_config())
+    assert cfg.build.overwrite is True
+
+
 def test_no_enrich_flags_opt_out():
     from faostatdb import cli
 
