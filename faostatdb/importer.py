@@ -238,6 +238,19 @@ def read_csv_header(con, csv_path: Path, encoding: str = "utf-8") -> list[str]:
 #: exact 64-bit type instead of falling through to lossy ``DOUBLE`` (exact only
 #: below 2**53). No fact/dim column in the current inventory needs it, but it
 #: costs nothing and protects source fidelity if one ever does.
+#:
+#: Do not "optimize" the paired ``sample_size=-1`` (full-file inference) back to a
+#: sample. Benchmarked on a 710 MB / 8M-row FAOSTAT-shaped CSV, sampled inference
+#: loads ~9x faster (~1s vs ~9s) — but it is *silently lossy*: when a column
+#: samples as INTEGER and a decimal appears in a later, unsampled row, DuckDB
+#: truncates ``123.45`` -> ``123`` with **no error raised**, so nothing (not even
+#: our row-count losslessness check) would catch the corruption. A "sample, then
+#: fall back to -1 on error" scheme therefore cannot work — there is no error to
+#: trap. An ``all_varchar`` + ``TRY_CAST`` retype is lossy the same way, and a
+#: hand-rolled strict detector that tries to match DuckDB's sniffer is fragile
+#: across DuckDB versions (e.g. leading-zero codes like ``'007'`` drift to DOUBLE).
+#: Full-file inference is the deliberate, correct choice; the extra seconds are the
+#: price of source-preserving typing.
 _AUTO_TYPE_CANDIDATES = "['INTEGER', 'BIGINT', 'DOUBLE', 'VARCHAR']"
 
 
