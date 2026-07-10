@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Iterable
@@ -101,6 +101,25 @@ class Manifest:
         self._entries[entry.dataset_code] = entry
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(asdict(entry)) + "\n")
+
+    def update_state(
+        self, dataset_code: str, *, now: str | None = None, **changes
+    ) -> ManifestEntry:
+        """Update one entry while preserving unchanged provenance fields.
+
+        The manifest is append-only and last-write-wins per dataset, so writing a
+        partial fresh ``ManifestEntry`` would accidentally erase earlier metadata
+        such as ``downloaded_at``, ``attempts`` or declared size/rows. State
+        transitions should call this helper with only the fields that actually
+        changed; omitted fields are carried forward from the current entry.
+        """
+        unknown = set(changes) - _ENTRY_FIELDS
+        if unknown:
+            raise TypeError(f"unknown manifest field(s): {', '.join(sorted(unknown))}")
+        current = self.get(dataset_code) or ManifestEntry(dataset_code=dataset_code)
+        entry = replace(current, **changes)
+        self.update(entry, now=now)
+        return entry
 
     def attempts(self, dataset_code: str) -> int:
         """How many download attempts have been recorded for this dataset."""

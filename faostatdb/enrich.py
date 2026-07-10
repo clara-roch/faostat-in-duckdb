@@ -42,7 +42,16 @@ AREA_CLASSIFICATION_CSV = Path(__file__).resolve().parent / "area_classification
 
 # This table is package-derived (not source FAOSTAT content), so it is free to use
 # natural types: the FAO internal ``area_code`` and the transition years are stored
-# as ``INTEGER`` (the shared source ``dim_area`` still keeps ``area_code`` as text).
+# as ``INTEGER``.
+#
+# This intentionally differs from source ``dim_area.area_code``, which is stored as
+# ``VARCHAR`` by the generic shared-dimension policy. That text storage keeps all
+# dim_* tables robust to heterogeneous code types across datasets. In the complete
+# FAOSTAT bulk inventory checked during development, however, every source
+# ``area_code`` value is canonical integer text (no non-integer values, no leading
+# zeros, no collisions after integer casting), and every fact-table ``area_code``
+# infers as INTEGER. The code that must stay text is the alternate M49 code
+# (``area_code_m49``), where values such as "001" carry leading zeros.
 DDL_AREA_CLASSIFICATION = """\
 CREATE TABLE IF NOT EXISTS area_classification (
     area_code            INTEGER PRIMARY KEY,

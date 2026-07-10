@@ -47,3 +47,39 @@ def test_reuses_imported_and_validated(tmp_path):
         m = _manifest(tmp_path)
         m.update(ManifestEntry(dataset_code="QCL", state=good.value))
         assert m.needs_download("QCL", archive) is False, good
+
+
+def test_update_state_preserves_provenance_across_transitions(tmp_path):
+    path = tmp_path / "manifest.jsonl"
+    m = Manifest(path)
+    m.update_state(
+        "QCL",
+        state=State.DOWNLOADED.value,
+        archive_path=str(tmp_path / "QCL.zip"),
+        url="https://example.test/QCL.zip",
+        expected_size="1MB",
+        expected_rows=123,
+        attempts=2,
+        downloaded_at="2026-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:01+00:00",
+    )
+    m.update_state(
+        "QCL",
+        state=State.IMPORTING.value,
+        archive_sha256="abc",
+        now="2026-01-01T00:00:02+00:00",
+    )
+    m.update_state(
+        "QCL",
+        state=State.IMPORTED.value,
+        now="2026-01-01T00:00:03+00:00",
+    )
+
+    reloaded = Manifest(path).get("QCL")
+    assert reloaded is not None
+    assert reloaded.state == State.IMPORTED.value
+    assert reloaded.archive_sha256 == "abc"
+    assert reloaded.downloaded_at == "2026-01-01T00:00:00+00:00"
+    assert reloaded.expected_size == "1MB"
+    assert reloaded.expected_rows == 123
+    assert reloaded.attempts == 2

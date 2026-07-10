@@ -71,7 +71,9 @@ def test_area_classification_schema_is_minimal(con):
 
 def test_area_classification_uses_integer_codes_and_years(con):
     # This is package-derived, not source, so the FAO area_code and the transition
-    # years are stored as INTEGER (not the VARCHAR the shared source dims use).
+    # years are stored as INTEGER. This is intentional even though dim_area stores
+    # area_code as VARCHAR for generic shared-dimension consistency: current full
+    # FAOSTAT area codes are canonical integer text. M49 codes remain VARCHAR.
     enrich_mod.enrich_areas(con)
     enrich_mod.enrich_history(con)
     types = {r[0]: r[1] for r in con.execute("DESCRIBE area_classification").fetchall()}

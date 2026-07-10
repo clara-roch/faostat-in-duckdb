@@ -339,7 +339,7 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
     from . import progress as progress_mod
     from . import schema as schema_mod
     from . import validate as validate_mod
-    from .download import ManifestEntry, State
+    from .download import State
 
     reporter = reporter or progress_mod.Reporter()
 
@@ -405,16 +405,17 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
 
     download_failed: set[str] = set()
     for rec in to_download:
-        manifest.update(
-            ManifestEntry(
-                dataset_code=rec.code,
-                state=State.DOWNLOADING.value,
-                archive_path=str(archives[rec.code]),
-                url=rec.file_location,
-                expected_size=rec.file_size,
-                expected_rows=rec.file_rows,
-                attempts=manifest.attempts(rec.code) + 1,
-            ),
+        manifest.update_state(
+            rec.code,
+            state=State.DOWNLOADING.value,
+            archive_path=str(archives[rec.code]),
+            archive_sha256=None,
+            url=rec.file_location,
+            expected_size=rec.file_size,
+            expected_rows=rec.file_rows,
+            attempts=manifest.attempts(rec.code) + 1,
+            error=None,
+            downloaded_at=None,
             now=_now(),
         )
         # A live progress bar already shows the "downloading" state, so only
@@ -440,14 +441,12 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                     future.result()
                 except Exception as exc:  # noqa: BLE001 — recorded per-dataset
                     download_failed.add(rec.code)
-                    manifest.update(
-                        ManifestEntry(
-                            dataset_code=rec.code,
-                            state=State.FAILED.value,
-                            archive_path=str(archives[rec.code]),
-                            url=rec.file_location,
-                            error=f"download: {exc}",
-                        ),
+                    manifest.update_state(
+                        rec.code,
+                        state=State.FAILED.value,
+                        archive_path=str(archives[rec.code]),
+                        url=rec.file_location,
+                        error=f"download: {exc}",
                         now=_now(),
                     )
                     reporter.event(rec.code, "download", "failed", message=f"download failed: {exc}")
@@ -455,14 +454,14 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                         print(f"strict: download failed for {rec.code}", file=sys.stderr)
                         return 1
                 else:
-                    manifest.update(
-                        ManifestEntry(
-                            dataset_code=rec.code,
-                            state=State.DOWNLOADED.value,
-                            archive_path=str(archives[rec.code]),
-                            url=rec.file_location,
-                            downloaded_at=_now(),
-                        ),
+                    manifest.update_state(
+                        rec.code,
+                        state=State.DOWNLOADED.value,
+                        archive_path=str(archives[rec.code]),
+                        archive_sha256=None,
+                        url=rec.file_location,
+                        error=None,
+                        downloaded_at=_now(),
                         now=_now(),
                     )
                     size = _human_bytes(archives[rec.code].stat().st_size)
@@ -499,14 +498,12 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                 continue
             if not archive.exists():
                 failed.append(rec.code)
-                manifest.update(
-                    ManifestEntry(
-                        dataset_code=rec.code,
-                        state=State.FAILED.value,
-                        archive_path=str(archive),
-                        url=rec.file_location,
-                        error="archive missing",
-                    ),
+                manifest.update_state(
+                    rec.code,
+                    state=State.FAILED.value,
+                    archive_path=str(archive),
+                    url=rec.file_location,
+                    error="archive missing",
                     now=_now(),
                 )
                 _record_dataset(con, rec, snapshot, archive, None, "failed", dl_at, None)
@@ -518,14 +515,12 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
             result = validate_mod.validate_zip(archive)
             if not result.ok:
                 failed.append(rec.code)
-                manifest.update(
-                    ManifestEntry(
-                        dataset_code=rec.code,
-                        state=State.ZIP_INVALID.value,
-                        archive_path=str(archive),
-                        url=rec.file_location,
-                        error=result.reason,
-                    ),
+                manifest.update_state(
+                    rec.code,
+                    state=State.ZIP_INVALID.value,
+                    archive_path=str(archive),
+                    url=rec.file_location,
+                    error=result.reason,
                     now=_now(),
                 )
                 _record_dataset(con, rec, snapshot, archive, None, "zip_invalid", dl_at, None)
@@ -534,14 +529,13 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                     return 1
                 continue
 
-            manifest.update(
-                ManifestEntry(
-                    dataset_code=rec.code,
-                    state=State.IMPORTING.value,
-                    archive_path=str(archive),
-                    archive_sha256=result.sha256,
-                    url=rec.file_location,
-                ),
+            manifest.update_state(
+                rec.code,
+                state=State.IMPORTING.value,
+                archive_path=str(archive),
+                archive_sha256=result.sha256,
+                url=rec.file_location,
+                error=None,
                 now=_now(),
             )
             try:
@@ -551,15 +545,13 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                 )
             except Exception as exc:  # noqa: BLE001 — recorded per-dataset
                 failed.append(rec.code)
-                manifest.update(
-                    ManifestEntry(
-                        dataset_code=rec.code,
-                        state=State.FAILED.value,
-                        archive_path=str(archive),
-                        archive_sha256=result.sha256,
-                        url=rec.file_location,
-                        error=f"import: {exc}",
-                    ),
+                manifest.update_state(
+                    rec.code,
+                    state=State.FAILED.value,
+                    archive_path=str(archive),
+                    archive_sha256=result.sha256,
+                    url=rec.file_location,
+                    error=f"import: {exc}",
                     now=_now(),
                 )
                 _record_dataset(con, rec, snapshot, archive, result.sha256, "failed", dl_at, None)
@@ -569,14 +561,13 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
                 continue
 
             imported.append(rec.code)
-            manifest.update(
-                ManifestEntry(
-                    dataset_code=rec.code,
-                    state=State.IMPORTED.value,
-                    archive_path=str(archive),
-                    archive_sha256=result.sha256,
-                    url=rec.file_location,
-                ),
+            manifest.update_state(
+                rec.code,
+                state=State.IMPORTED.value,
+                archive_path=str(archive),
+                archive_sha256=result.sha256,
+                url=rec.file_location,
+                error=None,
                 now=_now(),
             )
             _record_dataset(
