@@ -10,8 +10,8 @@ import pytest
 from faostatdb import importer as importer_mod
 from faostatdb import metadata as metadata_mod
 from faostatdb import schema as schema_mod
-from faostatdb.config import BuildConfig, Config, DatasetsConfig, EnrichmentConfig
-from faostatdb.cli import main, run_build
+from faostatdb.config import BuildConfig, Config, DatasetsConfig, EnrichmentConfig, parse_years
+from faostatdb.cli import _year_filter_message, main, run_build
 
 MAIN = (
     '"Area Code","Area","Item Code","Item","Value","Flag"\n'
@@ -46,6 +46,20 @@ def test_config_init_writes_and_respects_force(tmp_path, monkeypatch):
     # Second run without --force refuses; with --force it overwrites.
     assert main(["config", "init"]) == 1
     assert main(["config", "init", "--force"]) == 0
+
+
+def test_year_filter_message_reflects_overwrite_mode():
+    years = parse_years("2010-")
+
+    incremental = _year_filter_message(Config(), years)
+    assert "Datasets already present in faostat.duckdb accumulate" in incremental
+
+    overwrite = _year_filter_message(
+        Config(build=BuildConfig(overwrite=True)),
+        years,
+    )
+    assert "will be overwritten before import" in overwrite
+    assert "accumulate" not in overwrite
 
 
 def test_successful_build_removes_default_download_dir(tmp_path, monkeypatch):

@@ -374,12 +374,7 @@ def run_build(cfg: Config, *, assume_yes: bool, strict: bool, reporter=None) -> 
         f"(archives cached in {download_dir}, {jobs} download job(s))"
     )
     if years:
-        reporter.log(
-            f"year filter active: keeping only rows for {years.describe()} "
-            f"({years.count_description()}). Datasets already present in {cfg.build.database} "
-            f"accumulate (these years are merged in, other years kept); datasets "
-            f"without a year column import in full"
-        )
+        reporter.log(_year_filter_message(cfg, years))
 
     manifest = download_mod.Manifest(paths_mod.manifest_path(download_dir))
 
@@ -932,6 +927,27 @@ def _configure_duckdb(con, cfg: Config) -> None:
         # Quote defensively; the value is user-supplied config.
         limit = cfg.performance.memory_limit.replace("'", "")
         con.execute(f"PRAGMA memory_limit='{limit}'")
+
+
+def _year_filter_message(cfg: Config, years) -> str:
+    """Human-readable note for a build's year-filter semantics."""
+    base = (
+        f"year filter active: keeping only rows for {years.describe()} "
+        f"({years.count_description()}). "
+    )
+    if cfg.build.overwrite:
+        return (
+            base +
+            f"{cfg.build.database} will be overwritten before import, so selected "
+            "datasets are built from scratch with this year filter; datasets without "
+            "a year column import in full"
+        )
+    return (
+        base +
+        f"Datasets already present in {cfg.build.database} accumulate "
+        "(these years are merged in, other years kept); datasets without a year "
+        "column import in full"
+    )
 
 
 def _now() -> str:
